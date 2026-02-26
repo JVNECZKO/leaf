@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useMemo } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { api, type Campaign } from '@/lib/api';
+import { api, type Campaign, type CampaignsResponse } from '@/lib/api';
 import { wsClient } from '@/lib/ws';
 import { CreateCampaignModal } from '@/components/campaigns/create-campaign-modal';
 import { EditCampaignModal } from '@/components/campaigns/edit-campaign-modal';
@@ -13,20 +13,32 @@ import { formatDate, formatNumber, progressPercent } from '@/lib/utils';
 import {
   Plus, Play, Pause, Trash2, Target, ArrowRight, Users,
   CheckCircle2, XCircle, Clock, PauseCircle, Pencil, Layers,
+  ChevronLeft, ChevronRight,
 } from 'lucide-react';
 import Link from 'next/link';
 import toast from 'react-hot-toast';
+
+const PAGE_SIZE_OPTIONS = [10, 20, 50];
 
 export default function CampaignsPage() {
   const qc = useQueryClient();
   const [modalOpen, setModalOpen] = useState(false);
   const [editCampaign, setEditCampaign] = useState<Campaign | null>(null);
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(20);
 
-  const { data: campaigns, isLoading } = useQuery({
-    queryKey: ['campaigns'],
-    queryFn: api.campaigns.list,
+  const queryParams = { page: String(page), page_size: String(pageSize) };
+
+  const { data, isLoading } = useQuery({
+    queryKey: ['campaigns', queryParams],
+    queryFn: () => api.campaigns.list(queryParams),
     refetchInterval: 4000,
+    placeholderData: (prev) => prev,
   });
+
+  const campaigns = data?.data ?? [];
+  const total = data?.total ?? 0;
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
 
   useEffect(() => {
     const unsub = wsClient.subscribe(() => {
@@ -34,6 +46,12 @@ export default function CampaignsPage() {
     });
     return unsub;
   }, [qc]);
+
+  // Reset to page 1 when page size changes
+  const handlePageSizeChange = (ps: number) => {
+    setPageSize(ps);
+    setPage(1);
+  };
 
   const startMutation = useMutation({
     mutationFn: (id: string) => api.campaigns.start(id),
@@ -77,16 +95,16 @@ export default function CampaignsPage() {
     onSuccess: (res) => {
       qc.invalidateQueries({ queryKey: ['campaigns'] });
       qc.invalidateQueries({ queryKey: ['stats'] });
+      setPage(1);
       toast.success(`Removed ${res.deleted} campaign${res.deleted !== 1 ? 's' : ''}`);
     },
     onError: (e: Error) => toast.error(e.message),
   });
 
-  const runningCount = campaigns?.filter(c => c.status === 'running').length ?? 0;
+  const runningCount = campaigns.filter(c => c.status === 'running').length;
 
-  // Group campaigns: batched ones grouped by batch_id, standalone ones listed normally
+  // Group campaigns on current page: batched ones grouped by batch_id, standalone listed normally
   const { batches, standalone } = useMemo(() => {
-    if (!campaigns) return { batches: new Map<string, Campaign[]>(), standalone: [] };
     const batchMap = new Map<string, Campaign[]>();
     const solo: Campaign[] = [];
     for (const c of campaigns) {
@@ -108,7 +126,7 @@ export default function CampaignsPage() {
         <div>
           <h1 className="text-2xl font-bold text-text-primary">Campaigns</h1>
           <p className="text-sm text-text-secondary mt-1">
-            {campaigns?.length ?? 0} campaigns total{runningCount > 0 && ` · ${runningCount} running`}
+            {total} campaigns total{runningCount > 0 && ` · ${runningCount} running`}
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -122,11 +140,11 @@ export default function CampaignsPage() {
               Pause All
             </Button>
           )}
-          {(campaigns?.length ?? 0) > 0 && (
+          {total > 0 && (
             <Button
               variant="ghost"
               onClick={() => {
-                if (confirm(`Remove all ${campaigns?.length} campaigns and their data? This cannot be undone.`))
+                if (confirm(`Remove all ${total} campaigns and their data? This cannot be undone.`))
                   deleteAllMutation.mutate();
               }}
               loading={deleteAllMutation.isPending}
@@ -143,13 +161,13 @@ export default function CampaignsPage() {
       </div>
 
       {/* Campaign list */}
-      {isLoading ? (
+      {isLoading && !data ? (
         <div className="space-y-4">
           {[...Array(3)].map((_, i) => (
             <div key={i} className="glass-card p-6 skeleton h-28 rounded-xl" />
           ))}
         </div>
-      ) : !campaigns?.length ? (
+      ) : total === 0 ? (
         <div className="glass-card py-20 flex flex-col items-center text-center">
           <div className="w-16 h-16 rounded-2xl bg-accent-muted flex items-center justify-center mb-4">
             <Target className="w-7 h-7 text-accent" />
@@ -163,109 +181,175 @@ export default function CampaignsPage() {
           </Button>
         </div>
       ) : (
-        <div className="space-y-6">
-          {/* Batch groups */}
-          {Array.from(batches.entries()).map(([batchId, bCampaigns]) => {
-            const sorted = [...bCampaigns].sort((a, b) => (a.queue_position ?? 0) - (b.queue_position ?? 0));
-            const totalLeads = sorted.reduce((s, c) => s + c.total_leads, 0);
-            const totalCompleted = sorted.reduce((s, c) => s + c.completed_tasks, 0);
-            const totalTasks = sorted.reduce((s, c) => s + c.total_tasks, 0);
-            const batchRunning = sorted.filter(c => c.status === 'running').length;
-            const batchDone = sorted.filter(c => c.status === 'completed').length;
-            const prefix = sorted[0]?.name.split(' — ').slice(1).join(' — ') || 'Batch';
+        <>
+          <div className="space-y-6">
+            {/* Batch groups */}
+            {Array.from(batches.entries()).map(([batchId, bCampaigns]) => {
+              const sorted = [...bCampaigns].sort((a, b) => (a.queue_position ?? 0) - (b.queue_position ?? 0));
+              const totalLeads = sorted.reduce((s, c) => s + c.total_leads, 0);
+              const totalCompleted = sorted.reduce((s, c) => s + c.completed_tasks, 0);
+              const totalTasks = sorted.reduce((s, c) => s + c.total_tasks, 0);
+              const batchRunning = sorted.filter(c => c.status === 'running').length;
+              const batchDone = sorted.filter(c => c.status === 'completed').length;
+              const prefix = sorted[0]?.name.split(' — ').slice(1).join(' — ') || 'Batch';
 
-            return (
-              <div key={batchId} className="space-y-2">
-                {/* Batch header */}
-                <div className="flex items-center gap-3 px-1">
-                  <div className="flex items-center gap-2">
-                    <Layers className="w-4 h-4 text-[#A78BFA]" />
-                    <span className="text-sm font-semibold text-text-primary">
-                      {prefix}
-                    </span>
-                    <span className="text-xs text-text-muted px-1.5 py-0.5 rounded bg-bg-hover border border-border">
-                      {sorted.length} campaigns
-                    </span>
+              return (
+                <div key={batchId} className="space-y-2">
+                  {/* Batch header */}
+                  <div className="flex items-center gap-3 px-1">
+                    <div className="flex items-center gap-2">
+                      <Layers className="w-4 h-4 text-[#A78BFA]" />
+                      <span className="text-sm font-semibold text-text-primary">
+                        {prefix}
+                      </span>
+                      <span className="text-xs text-text-muted px-1.5 py-0.5 rounded bg-bg-hover border border-border">
+                        {sorted.length} campaigns
+                      </span>
+                    </div>
+                    <div className="flex-1 h-px bg-border" />
+                    <div className="text-xs text-text-muted flex items-center gap-3">
+                      <span>{formatNumber(totalLeads)} leads</span>
+                      <span>{totalCompleted}/{totalTasks} tasks</span>
+                      {batchRunning > 0 && (
+                        <button
+                          onClick={() => {
+                            sorted.filter(c => c.status === 'running').forEach(c => stopMutation.mutate(c.id));
+                          }}
+                          className="flex items-center gap-1 text-warning hover:text-warning/80 transition-colors"
+                        >
+                          <PauseCircle className="w-3.5 h-3.5" />
+                          Pause batch
+                        </button>
+                      )}
+                      {batchRunning === 0 && batchDone < sorted.length && (
+                        <button
+                          onClick={() => {
+                            sorted.filter(c => c.status === 'pending' || c.status === 'paused')
+                              .forEach(c => startMutation.mutate(c.id));
+                          }}
+                          className="flex items-center gap-1 text-accent hover:text-accent-hover transition-colors"
+                        >
+                          <Play className="w-3.5 h-3.5" />
+                          Start batch
+                        </button>
+                      )}
+                    </div>
                   </div>
-                  <div className="flex-1 h-px bg-border" />
-                  <div className="text-xs text-text-muted flex items-center gap-3">
-                    <span>{formatNumber(totalLeads)} leads</span>
-                    <span>{totalCompleted}/{totalTasks} tasks</span>
-                    {batchRunning > 0 && (
-                      <button
-                        onClick={() => {
-                          sorted.filter(c => c.status === 'running').forEach(c => stopMutation.mutate(c.id));
+
+                  {/* Batch campaigns */}
+                  <div className="space-y-2 pl-2 border-l-2 border-[#A78BFA]/30">
+                    {sorted.map(campaign => (
+                      <CampaignCard
+                        key={campaign.id}
+                        campaign={campaign}
+                        onStart={() => startMutation.mutate(campaign.id)}
+                        onStop={() => stopMutation.mutate(campaign.id)}
+                        onDelete={() => {
+                          if (confirm(`Delete "${campaign.name}"? This cannot be undone.`))
+                            deleteMutation.mutate(campaign.id);
                         }}
-                        className="flex items-center gap-1 text-warning hover:text-warning/80 transition-colors"
-                      >
-                        <PauseCircle className="w-3.5 h-3.5" />
-                        Pause batch
-                      </button>
-                    )}
-                    {batchRunning === 0 && batchDone < sorted.length && (
-                      <button
-                        onClick={() => {
-                          sorted.filter(c => c.status === 'pending' || c.status === 'paused')
-                            .forEach(c => startMutation.mutate(c.id));
-                        }}
-                        className="flex items-center gap-1 text-accent hover:text-accent-hover transition-colors"
-                      >
-                        <Play className="w-3.5 h-3.5" />
-                        Start batch
-                      </button>
-                    )}
+                        onEdit={() => setEditCampaign(campaign)}
+                        startLoading={startMutation.isPending}
+                        stopLoading={stopMutation.isPending}
+                      />
+                    ))}
                   </div>
                 </div>
+              );
+            })}
 
-                {/* Batch campaigns */}
-                <div className="space-y-2 pl-2 border-l-2 border-[#A78BFA]/30">
-                  {sorted.map(campaign => (
-                    <CampaignCard
-                      key={campaign.id}
-                      campaign={campaign}
-                      onStart={() => startMutation.mutate(campaign.id)}
-                      onStop={() => stopMutation.mutate(campaign.id)}
-                      onDelete={() => {
-                        if (confirm(`Delete "${campaign.name}"? This cannot be undone.`))
-                          deleteMutation.mutate(campaign.id);
-                      }}
-                      onEdit={() => setEditCampaign(campaign)}
-                      startLoading={startMutation.isPending}
-                      stopLoading={stopMutation.isPending}
-                    />
-                  ))}
-                </div>
+            {/* Standalone campaigns */}
+            {standalone.length > 0 && (
+              <div className="space-y-3">
+                {batches.size > 0 && (
+                  <div className="flex items-center gap-3 px-1">
+                    <span className="text-sm font-medium text-text-muted">Individual campaigns</span>
+                    <div className="flex-1 h-px bg-border" />
+                  </div>
+                )}
+                {standalone.map(campaign => (
+                  <CampaignCard
+                    key={campaign.id}
+                    campaign={campaign}
+                    onStart={() => startMutation.mutate(campaign.id)}
+                    onStop={() => stopMutation.mutate(campaign.id)}
+                    onDelete={() => {
+                      if (confirm(`Delete "${campaign.name}"? This cannot be undone.`))
+                        deleteMutation.mutate(campaign.id);
+                    }}
+                    onEdit={() => setEditCampaign(campaign)}
+                    startLoading={startMutation.isPending}
+                    stopLoading={stopMutation.isPending}
+                  />
+                ))}
               </div>
-            );
-          })}
+            )}
+          </div>
 
-          {/* Standalone campaigns */}
-          {standalone.length > 0 && (
-            <div className="space-y-3">
-              {batches.size > 0 && (
-                <div className="flex items-center gap-3 px-1">
-                  <span className="text-sm font-medium text-text-muted">Individual campaigns</span>
-                  <div className="flex-1 h-px bg-border" />
-                </div>
-              )}
-              {standalone.map(campaign => (
-                <CampaignCard
-                  key={campaign.id}
-                  campaign={campaign}
-                  onStart={() => startMutation.mutate(campaign.id)}
-                  onStop={() => stopMutation.mutate(campaign.id)}
-                  onDelete={() => {
-                    if (confirm(`Delete "${campaign.name}"? This cannot be undone.`))
-                      deleteMutation.mutate(campaign.id);
-                  }}
-                  onEdit={() => setEditCampaign(campaign)}
-                  startLoading={startMutation.isPending}
-                  stopLoading={stopMutation.isPending}
-                />
+          {/* Pagination bar */}
+          <div className="flex items-center justify-between mt-6 pt-4 border-t border-border">
+            <div className="flex items-center gap-3 text-xs text-text-muted">
+              <span>
+                {((page - 1) * pageSize) + 1}–{Math.min(page * pageSize, total)} of {total.toLocaleString()}
+              </span>
+              <span className="text-border">|</span>
+              <span>Per page:</span>
+              {PAGE_SIZE_OPTIONS.map(ps => (
+                <button
+                  key={ps}
+                  onClick={() => handlePageSizeChange(ps)}
+                  className={`px-2 py-0.5 rounded border transition-all ${
+                    pageSize === ps
+                      ? 'bg-accent text-white border-transparent'
+                      : 'border-border hover:border-border-hover'
+                  }`}
+                >
+                  {ps}
+                </button>
               ))}
             </div>
-          )}
-        </div>
+
+            <div className="flex items-center gap-1">
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => setPage(1)}
+                disabled={page === 1}
+              >
+                «
+              </Button>
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => setPage(p => Math.max(1, p - 1))}
+                disabled={page === 1}
+                icon={<ChevronLeft className="w-3.5 h-3.5" />}
+              >
+                Prev
+              </Button>
+              <span className="px-3 py-1 text-xs text-text-muted">
+                {page} / {totalPages}
+              </span>
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => setPage(p => Math.min(totalPages, p + 1))}
+                disabled={page >= totalPages}
+                icon={<ChevronRight className="w-3.5 h-3.5" />}
+              >
+                Next
+              </Button>
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => setPage(totalPages)}
+                disabled={page >= totalPages}
+              >
+                »
+              </Button>
+            </div>
+          </div>
+        </>
       )}
 
       <CreateCampaignModal open={modalOpen} onClose={() => setModalOpen(false)} />

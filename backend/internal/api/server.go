@@ -223,12 +223,20 @@ func (s *Server) getStats(c *gin.Context) {
 // --- Campaigns ---
 
 func (s *Server) listCampaigns(c *gin.Context) {
-	campaigns, err := s.repo.ListCampaigns()
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 || pageSize > 100 {
+		pageSize = 20
+	}
+	campaigns, total, err := s.repo.ListCampaignsPaginated(page, pageSize)
 	if err != nil {
 		c.JSON(500, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(200, campaigns)
+	c.JSON(200, gin.H{"data": campaigns, "total": total, "page": page, "page_size": pageSize})
 }
 
 type CreateCampaignRequest struct {

@@ -58,6 +58,15 @@ func (r *Repository) ListCampaigns() ([]models.Campaign, error) {
 	return campaigns, err
 }
 
+func (r *Repository) ListCampaignsPaginated(page, pageSize int) ([]models.Campaign, int64, error) {
+	var campaigns []models.Campaign
+	var total int64
+	r.db.Model(&models.Campaign{}).Count(&total)
+	offset := (page - 1) * pageSize
+	err := r.db.Order("created_at desc").Offset(offset).Limit(pageSize).Find(&campaigns).Error
+	return campaigns, total, err
+}
+
 func (r *Repository) UpdateCampaign(c *models.Campaign) error {
 	return r.db.Save(c).Error
 }

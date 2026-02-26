@@ -29,11 +29,12 @@ export default function DashboardPage() {
     refetchInterval: 5000,
   });
 
-  const { data: campaigns } = useQuery({
-    queryKey: ['campaigns'],
-    queryFn: api.campaigns.list,
+  const { data: campaignsData } = useQuery({
+    queryKey: ['campaigns', { page: '1', page_size: '5' }],
+    queryFn: () => api.campaigns.list({ page: '1', page_size: '5' }),
     refetchInterval: 5000,
   });
+  const campaigns = campaignsData?.data;
 
   // Real-time updates
   useEffect(() => {
@@ -121,7 +122,7 @@ export default function DashboardPage() {
           <div className="flex items-center justify-between mb-6">
             <div>
               <h2 className="text-base font-semibold text-text-primary">Recent Campaigns</h2>
-              <p className="text-xs text-text-muted mt-0.5">{campaigns?.length ?? 0} total</p>
+              <p className="text-xs text-text-muted mt-0.5">{campaignsData?.total ?? 0} total</p>
             </div>
             <Link
               href="/campaigns"

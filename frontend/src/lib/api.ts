@@ -145,6 +145,13 @@ export interface LeadsResponse {
   page_size: number;
 }
 
+export interface CampaignsResponse {
+  data: Campaign[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
 export interface Setting {
   key: string;
   value: string;
@@ -199,7 +206,10 @@ export const api = {
   stats: () => request<Stats>('/stats'),
 
   campaigns: {
-    list: () => request<Campaign[]>('/campaigns'),
+    list: (params?: Record<string, string>) => {
+      const qs = params ? '?' + new URLSearchParams(params).toString() : '';
+      return request<CampaignsResponse>(`/campaigns${qs}`);
+    },
     get: (id: string) => request<Campaign>(`/campaigns/${id}`),
     create: (data: CreateCampaignPayload) =>
       request<Campaign>('/campaigns', { method: 'POST', body: JSON.stringify(data) }),

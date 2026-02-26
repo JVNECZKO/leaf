@@ -44,10 +44,11 @@ export default function LeadsPage() {
     refetchInterval: 10000,
   });
 
-  const { data: campaigns = [] } = useQuery({
-    queryKey: ['campaigns'],
-    queryFn: api.campaigns.list,
+  const { data: campaignsData } = useQuery({
+    queryKey: ['campaigns', { page: '1', page_size: '100' }],
+    queryFn: () => api.campaigns.list({ page: '1', page_size: '100' }),
   });
+  const campaigns = campaignsData?.data ?? [];
 
   const leads = data?.data ?? [];
   const total = data?.total ?? 0;
