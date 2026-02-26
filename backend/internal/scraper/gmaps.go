@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/chromedp/cdproto/cdp"
 	"github.com/chromedp/cdproto/fetch"
 	"github.com/chromedp/chromedp"
 )
@@ -27,12 +28,16 @@ type Config struct {
 }
 
 type Scraper struct {
-	allocCtx   context.Context
+	allocCtx    context.Context
 	allocCancel context.CancelFunc
-	config     Config
+	config      Config
+	proxyUser   string
+	proxyPass   string
 }
 
 func New(cfg Config) *Scraper {
+	var proxyUser, proxyPass string
+
 	opts := append(chromedp.DefaultExecAllocatorOptions[:],
 		chromedp.Flag("disable-blink-features", "AutomationControlled"),
 		chromedp.Flag("no-sandbox", true),
@@ -54,7 +59,17 @@ func New(cfg Config) *Scraper {
 	)
 
 	if cfg.ProxyURL != "" {
-		opts = append(opts, chromedp.ProxyServer(cfg.ProxyURL))
+		proxyHost := cfg.ProxyURL
+		if u, err := url.Parse(cfg.ProxyURL); err == nil && u.User != nil {
+			proxyUser = u.User.Username()
+			proxyPass, _ = u.User.Password()
+			u.User = nil
+			proxyHost = u.String()
+		}
+		opts = append(opts, chromedp.ProxyServer(proxyHost))
+		if proxyUser != "" {
+			log.Printf("[scraper] proxy: %s (user: %s)", proxyHost, proxyUser)
+		}
 	}
 
 	if !cfg.Headless {
@@ -71,6 +86,8 @@ func New(cfg Config) *Scraper {
 		allocCtx:    allocCtx,
 		allocCancel: allocCancel,
 		config:      cfg,
+		proxyUser:   proxyUser,
+		proxyPass:   proxyPass,
 	}
 }
 
@@ -97,6 +114,35 @@ func (s *Scraper) Search(ctx context.Context, service, location string, onPlace 
 	}
 
 	log.Printf("[scraper] searching: %q in %q → %s", service, location, searchURL)
+
+	// Set up proxy auth handler via CDP Fetch domain before any navigation.
+	// Chrome's --proxy-server flag doesn't support embedded credentials, so we
+	// handle auth challenges dynamically using the CDP fetch domain.
+	if s.proxyUser != "" {
+		chromedp.ListenTarget(timeoutCtx, func(ev interface{}) {
+			switch e := ev.(type) {
+			case *fetch.EventAuthRequired:
+				go func() {
+					c := chromedp.FromContext(timeoutCtx)
+					ctx2 := cdp.WithExecutor(timeoutCtx, c.Target)
+					_ = fetch.ContinueWithAuth(e.RequestID, &fetch.AuthChallengeResponse{
+						Response: fetch.AuthChallengeResponseResponseProvideCredentials,
+						Username: s.proxyUser,
+						Password: s.proxyPass,
+					}).Do(ctx2)
+				}()
+			case *fetch.EventRequestPaused:
+				go func() {
+					c := chromedp.FromContext(timeoutCtx)
+					ctx2 := cdp.WithExecutor(timeoutCtx, c.Target)
+					_ = fetch.ContinueRequest(e.RequestID).Do(ctx2)
+				}()
+			}
+		})
+		if err := chromedp.Run(timeoutCtx, fetch.Enable().WithHandleAuthRequests(true)); err != nil {
+			log.Printf("[scraper] fetch.Enable: %v", err)
+		}
+	}
 
 	if err := chromedp.Run(timeoutCtx, chromedp.Navigate(searchURL)); err != nil {
 		return fmt.Errorf("navigate: %w", err)
