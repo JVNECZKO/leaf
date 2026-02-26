@@ -315,7 +315,7 @@ func (m *Manager) runTask(ctx context.Context, campaign *models.Campaign, servic
 	err := pool.Search(ctx, service, location, func(place *scraper.Place) {
 		lead := placeToLead(place, campaign.ID, uuid.Nil)
 
-		if campaign.EnrichmentEnabled && lead.Website != "" && lead.Email == "" {
+		if campaign.EnrichmentEnabled && lead.Website != "" {
 			lead.EnrichStatus = models.EnrichPending
 		} else {
 			lead.EnrichStatus = models.EnrichNone
@@ -404,6 +404,12 @@ func (m *Manager) enrichLead(lead models.Lead) {
 		log.Printf("[enrichment] found email for %s: %s", lead.Name, lead.Email)
 	} else {
 		log.Printf("[enrichment] no email found for %s (%s)", lead.Name, lead.Website)
+	}
+
+	// Phone from website takes priority; fallback is the Maps card phone (already in lead.Phone)
+	if len(result.Phones) > 0 {
+		lead.Phone = result.Phones[0]
+		log.Printf("[enrichment] found phone for %s: %s", lead.Name, lead.Phone)
 	}
 
 	lead.ExtraEmails = emails

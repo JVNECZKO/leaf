@@ -53,6 +53,7 @@ var (
 type Result struct {
 	Emails      []string
 	SocialLinks []string
+	Phones      []string
 }
 
 type Enricher struct {
@@ -91,6 +92,7 @@ func (e *Enricher) EnrichWebsite(websiteURL string) (*Result, error) {
 	result := &Result{}
 	seenEmails := map[string]bool{}
 	seenSocial := map[string]bool{}
+	seenPhones := map[string]bool{}
 
 	// Start with main page + pre-computed contact paths
 	toVisit := []string{websiteURL}
@@ -119,20 +121,31 @@ func (e *Enricher) EnrichWebsite(websiteURL string) (*Result, error) {
 			continue
 		}
 
-		// Scan <a href> for mailto and social links
+		// Scan <a href> for mailto, tel and social links
 		doc.Find("a[href]").Each(func(_ int, s *goquery.Selection) {
 			href, _ := s.Attr("href")
 			href = strings.TrimSpace(href)
 			if href == "" {
 				return
 			}
+			lower := strings.ToLower(href)
 
 			// mailto:
-			if strings.HasPrefix(strings.ToLower(href), "mailto:") {
+			if strings.HasPrefix(lower, "mailto:") {
 				email := parseMailto(href)
 				if email != "" && isValidEmail(email) && !seenEmails[email] {
 					seenEmails[email] = true
 					result.Emails = append(result.Emails, email)
+				}
+				return
+			}
+
+			// tel: links — most reliable phone source
+			if strings.HasPrefix(lower, "tel:") {
+				phone := normalizePhone(strings.TrimPrefix(lower, "tel:"))
+				if phone != "" && !seenPhones[phone] {
+					seenPhones[phone] = true
+					result.Phones = append(result.Phones, phone)
 				}
 				return
 			}
@@ -156,6 +169,15 @@ func (e *Enricher) EnrichWebsite(websiteURL string) (*Result, error) {
 					isContactLink(href, s.Text()) {
 					toVisit = append(toVisit, abs)
 				}
+			}
+		})
+
+		// schema.org microdata — itemprop="telephone"
+		doc.Find("[itemprop='telephone']").Each(func(_ int, s *goquery.Selection) {
+			phone := normalizePhone(s.Text())
+			if phone != "" && !seenPhones[phone] {
+				seenPhones[phone] = true
+				result.Phones = append(result.Phones, phone)
 			}
 		})
 
@@ -279,6 +301,32 @@ func isSameDomain(host, absURL string) bool {
 	}
 	strip := func(h string) string { return strings.TrimPrefix(strings.ToLower(h), "www.") }
 	return strip(u.Host) == strip(host)
+}
+
+func normalizePhone(s string) string {
+	s = strings.TrimSpace(s)
+	var b strings.Builder
+	for i, c := range s {
+		switch {
+		case c == '+' && i == 0:
+			b.WriteRune(c)
+		case c >= '0' && c <= '9':
+			b.WriteRune(c)
+		case (c == ' ' || c == '-' || c == '.' || c == '(' || c == ')') && b.Len() > 0:
+			b.WriteRune(c)
+		}
+	}
+	out := strings.TrimSpace(b.String())
+	digits := 0
+	for _, c := range out {
+		if c >= '0' && c <= '9' {
+			digits++
+		}
+	}
+	if digits < 7 || digits > 15 {
+		return ""
+	}
+	return out
 }
 
 func isContactLink(href, text string) bool {
