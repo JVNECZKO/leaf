@@ -1,4 +1,5 @@
 import { WS_URL } from './api';
+import { getToken } from './auth';
 
 export type WSMessage = {
   type: string;
