@@ -19,7 +19,9 @@ class WebSocketClient {
     if (this.ws?.readyState === WebSocket.OPEN) return;
 
     try {
-      this.ws = new WebSocket(WS_URL);
+      const token = getToken();
+      const url = token ? `${WS_URL}?token=${token}` : WS_URL;
+      this.ws = new WebSocket(url);
 
       this.ws.onopen = () => {
         this.reconnectDelay = 1000;
