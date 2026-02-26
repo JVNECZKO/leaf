@@ -1,0 +1,340 @@
+package worker
+
+import (
+	"context"
+	"fmt"
+	"leaf/internal/db"
+	"leaf/internal/enrichment"
+	"leaf/internal/geohash"
+	"leaf/internal/models"
+	"leaf/internal/scraper"
+	"log"
+	"os"
+	"strconv"
+	"sync"
+	"time"
+
+	"github.com/google/uuid"
+	"golang.org/x/sync/semaphore"
+)
+
+type BroadcastMsg struct {
+	Type       string      `json:"type"`
+	CampaignID uuid.UUID   `json:"campaign_id"`
+	Payload    interface{} `json:"payload"`
+}
+
+type Manager struct {
+	repo      *db.Repository
+	enricher  *enrichment.Enricher
+	scraper   *scraper.Scraper
+	broadcast chan BroadcastMsg
+	active    map[uuid.UUID]context.CancelFunc
+	mu        sync.Mutex
+}
+
+func NewManager(repo *db.Repository, scrpr *scraper.Scraper, enrichr *enrichment.Enricher, broadcast chan BroadcastMsg) *Manager {
+	m := &Manager{
+		repo:      repo,
+		enricher:  enrichr,
+		scraper:   scrpr,
+		broadcast: broadcast,
+		active:    map[uuid.UUID]context.CancelFunc{},
+	}
+	go m.enrichmentLoop()
+	return m
+}
+
+func (m *Manager) StartCampaign(campaignID uuid.UUID) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if _, running := m.active[campaignID]; running {
+		return nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	m.active[campaignID] = cancel
+	go m.runCampaign(ctx, campaignID)
+	return nil
+}
+
+func (m *Manager) StopCampaign(campaignID uuid.UUID) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if cancel, ok := m.active[campaignID]; ok {
+		cancel()
+		delete(m.active, campaignID)
+	}
+
+	m.repo.UpdateCampaignStatus(campaignID, models.CampaignPaused)
+	m.broadcast <- BroadcastMsg{Type: "campaign_paused", CampaignID: campaignID}
+}
+
+func (m *Manager) IsCampaignRunning(campaignID uuid.UUID) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	_, ok := m.active[campaignID]
+	return ok
+}
+
+func (m *Manager) runCampaign(ctx context.Context, campaignID uuid.UUID) {
+	defer func() {
+		m.mu.Lock()
+		delete(m.active, campaignID)
+		m.mu.Unlock()
+	}()
+
+	campaign, err := m.repo.GetCampaign(campaignID)
+	if err != nil {
+		log.Printf("[worker] campaign %s not found: %v", campaignID, err)
+		return
+	}
+
+	// Load service/location names — strings only, no 240M task records.
+	services, err := m.repo.GetServiceNames(campaignID)
+	if err != nil || len(services) == 0 {
+		log.Printf("[worker] no services for campaign %s: %v", campaignID, err)
+		return
+	}
+
+	var locations []string
+	if campaign.GeohashMode {
+		tiles, tErr := geohash.GenerateTiles(campaign.GeohashArea, uint(campaign.GeohashPrecision))
+		if tErr != nil {
+			log.Printf("[worker] geohash tile generation failed for campaign %s: %v", campaignID, tErr)
+			return
+		}
+		zoom := geohash.ZoomForPrecision(uint(campaign.GeohashPrecision))
+		for _, t := range tiles {
+			locations = append(locations, fmt.Sprintf("%.6f,%.6f,%d", t[0], t[1], zoom))
+		}
+		log.Printf("[worker] geohash mode: %d tiles at precision %d for area %q",
+			len(tiles), campaign.GeohashPrecision, campaign.GeohashArea)
+	} else {
+		locations, err = m.repo.GetLocationNames(campaignID)
+		if err != nil || len(locations) == 0 {
+			log.Printf("[worker] no locations for campaign %s: %v", campaignID, err)
+			return
+		}
+	}
+
+	log.Printf("[worker] campaign %s: %d services × %d locations = %d pairs (offset %d)",
+		campaignID, len(services), len(locations), len(services)*len(locations), campaign.TaskOffset)
+
+	m.repo.UpdateCampaignStatus(campaignID, models.CampaignRunning)
+	m.broadcast <- BroadcastMsg{Type: "campaign_started", CampaignID: campaignID}
+
+	concurrency := campaign.Concurrency
+	if concurrency <= 0 {
+		concurrency = 2
+	}
+	if concurrency > 50 {
+		log.Printf("[worker] WARNING: concurrency=%d — make sure you have enough RAM/CPU", concurrency)
+	}
+
+	sem := semaphore.NewWeighted(int64(concurrency))
+	var wg sync.WaitGroup
+
+	nLoc := len(locations)
+	startOffset := campaign.TaskOffset
+	idx := startOffset
+
+	// O(1) skip to resume position — no brute-force iteration over completed pairs
+	svcStart := 0
+	locStart := 0
+	if startOffset > 0 && nLoc > 0 {
+		svcStart = startOffset / nLoc
+		locStart = startOffset % nLoc
+	}
+
+	for si := svcStart; si < len(services); si++ {
+		lStart := 0
+		if si == svcStart {
+			lStart = locStart
+		}
+		for li := lStart; li < nLoc; li++ {
+			select {
+			case <-ctx.Done():
+				goto done
+			default:
+			}
+
+			if err := sem.Acquire(ctx, 1); err != nil {
+				goto done
+			}
+
+			svc := services[si]
+			loc := locations[li]
+			wg.Add(1)
+			go func(s, l string) {
+				defer wg.Done()
+				defer sem.Release(1)
+				m.runTask(ctx, campaign, s, l)
+			}(svc, loc)
+
+			idx++
+			// Checkpoint every 500 dispatched pairs for crash recovery
+			if idx%500 == 0 {
+				m.repo.UpdateCampaignOffset(campaignID, idx)
+			}
+		}
+	}
+
+done:
+	wg.Wait()
+	// Save final offset so resume works correctly after pause/crash
+	m.repo.UpdateCampaignOffset(campaignID, idx)
+
+	if ctx.Err() == nil && idx >= len(services)*nLoc {
+		m.repo.UpdateCampaignStatus(campaignID, models.CampaignCompleted)
+		m.broadcast <- BroadcastMsg{Type: "campaign_completed", CampaignID: campaignID}
+	}
+}
+
+func (m *Manager) runTask(ctx context.Context, campaign *models.Campaign, service, location string) {
+	log.Printf("[worker] task: %q in %q", service, location)
+
+	leadCount := 0
+
+	err := m.scraper.Search(ctx, service, location, func(place *scraper.Place) {
+		lead := placeToLead(place, campaign.ID, uuid.Nil)
+
+		if campaign.EnrichmentEnabled && lead.Website != "" && lead.Email == "" {
+			lead.EnrichStatus = models.EnrichPending
+		} else {
+			lead.EnrichStatus = models.EnrichNone
+		}
+
+		if err := m.repo.CreateLead(lead); err != nil {
+			log.Printf("[worker] save lead error: %v", err)
+			return
+		}
+
+		m.repo.IncrementCampaignLeads(campaign.ID)
+		leadCount++
+
+		m.broadcast <- BroadcastMsg{Type: "lead_found", CampaignID: campaign.ID, Payload: lead}
+	})
+
+	if err != nil {
+		log.Printf("[worker] task %q/%q failed: %v", service, location, err)
+		m.repo.IncrementCampaignFailedTasks(campaign.ID)
+	} else {
+		m.repo.IncrementCampaignCompletedTasks(campaign.ID)
+	}
+
+	m.broadcast <- BroadcastMsg{
+		Type:       "task_completed",
+		CampaignID: campaign.ID,
+		Payload:    map[string]interface{}{"service": service, "location": location, "lead_count": leadCount},
+	}
+}
+
+func (m *Manager) enrichmentLoop() {
+	ticker := time.NewTicker(5 * time.Second)
+	resetTicker := time.NewTicker(10 * time.Minute)
+	defer ticker.Stop()
+	defer resetTicker.Stop()
+
+	for {
+		select {
+		case <-resetTicker.C:
+			// Reset stuck enrichments (processing > 10 min = likely crashed)
+			m.repo.ResetStuckEnrichments()
+
+		case <-ticker.C:
+			// Read workers count from DB each tick so changes apply without restart
+			workers := m.repo.GetSettingInt("ENRICHMENT_WORKERS", enrichmentWorkersFromEnv())
+
+			// GetLeadsForEnrichment atomically marks them as "processing" to avoid duplicates
+			leads, err := m.repo.GetLeadsForEnrichment(workers * 2)
+			if err != nil || len(leads) == 0 {
+				continue
+			}
+
+			sem := semaphore.NewWeighted(int64(workers))
+			for _, lead := range leads {
+				if err := sem.Acquire(context.Background(), 1); err != nil {
+					break
+				}
+				go func(l models.Lead) {
+					defer sem.Release(1)
+					m.enrichLead(l)
+				}(lead)
+			}
+		}
+	}
+}
+
+func (m *Manager) enrichLead(lead models.Lead) {
+	log.Printf("[enrichment] %s → %s", lead.Name, lead.Website)
+
+	result, err := m.enricher.EnrichWebsite(lead.Website)
+	if err != nil {
+		log.Printf("[enrichment] error for %s: %v", lead.Website, err)
+		lead.EnrichStatus = models.EnrichFailed
+		m.repo.UpdateLead(&lead)
+		return
+	}
+	if result == nil {
+		lead.EnrichStatus = models.EnrichFailed
+		m.repo.UpdateLead(&lead)
+		return
+	}
+
+	emails, social := m.enricher.SerializeResult(result)
+	if len(result.Emails) > 0 {
+		lead.Email = result.Emails[0]
+		log.Printf("[enrichment] found email for %s: %s", lead.Name, lead.Email)
+	} else {
+		log.Printf("[enrichment] no email found for %s (%s)", lead.Name, lead.Website)
+	}
+
+	lead.ExtraEmails = emails
+	lead.SocialLinks = social
+	lead.EnrichStatus = models.EnrichDone
+
+	if err := m.repo.UpdateLead(&lead); err != nil {
+		log.Printf("[enrichment] update error: %v", err)
+		return
+	}
+
+	m.broadcast <- BroadcastMsg{
+		Type:       "lead_enriched",
+		CampaignID: lead.CampaignID,
+		Payload:    lead,
+	}
+}
+
+func placeToLead(p *scraper.Place, campaignID, taskID uuid.UUID) *models.Lead {
+	return &models.Lead{
+		CampaignID:     campaignID,
+		TaskID:         taskID,
+		Name:           p.Name,
+		Category:       p.Category,
+		Address:        p.Address,
+		Phone:          p.Phone,
+		Website:        p.Website,
+		Rating:         p.Rating,
+		ReviewCount:    p.ReviewCount,
+		MapsURL:        p.MapsURL,
+		PlaceID:        p.PlaceID,
+		Latitude:       p.Latitude,
+		Longitude:      p.Longitude,
+		Hours:          p.Hours,
+		PlusCode:       p.PlusCode,
+		SearchService:  p.SearchService,
+		SearchLocation: p.SearchLocation,
+	}
+}
+
+func enrichmentWorkersFromEnv() int {
+	v := os.Getenv("ENRICHMENT_WORKERS")
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 1 {
+		return 10
+	}
+	return n
+}

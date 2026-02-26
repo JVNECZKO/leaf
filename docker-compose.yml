@@ -1,0 +1,57 @@
+version: '3.9'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: leaf_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: leafdb
+      POSTGRES_USER: leaf
+      POSTGRES_PASSWORD: leafpassword
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U leaf -d leafdb"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: leaf_backend
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      DATABASE_URL: postgres://leaf:leafpassword@postgres:5432/leafdb?sslmode=disable
+      PORT: "8080"
+      CHROME_PATH: ""
+      MAX_BROWSERS: "3"
+      ENRICHMENT_WORKERS: "5"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - /dev/shm:/dev/shm
+    shm_size: '2gb'
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: leaf_frontend
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8080
+    depends_on:
+      - backend
+
+volumes:
+  postgres_data:

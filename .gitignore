@@ -1,0 +1,13 @@
+# Environment files — contain secrets, never commit
+backend/.env
+frontend/.env
+frontend/.env.local
+frontend/.env.production.local
+
+# Build artifacts
+backend/leaf-server
+frontend/.next/
+frontend/node_modules/
+
+# OS
+.DS_Store
