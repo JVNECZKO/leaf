@@ -35,7 +35,6 @@ export function CreateCampaignModal({ open, onClose }: Props) {
   const [concurrency, setConcurrency] = useState(2);
   const [customMode, setCustomMode] = useState(false);
   const [customValue, setCustomValue] = useState('');
-  const [proxyURL, setProxyURL] = useState('');
   const [enrichmentEnabled, setEnrichmentEnabled] = useState(true);
   const [showAdvanced, setShowAdvanced] = useState(false);
 
@@ -89,7 +88,7 @@ export function CreateCampaignModal({ open, onClose }: Props) {
     setConcurrency(2);
     setCustomMode(false);
     setCustomValue('');
-    setProxyURL('');
+
     setEnrichmentEnabled(true);
     setShowAdvanced(false);
     setLocationMode('manual');
@@ -118,7 +117,6 @@ export function CreateCampaignModal({ open, onClose }: Props) {
         name: name.trim(),
         services,
         concurrency,
-        proxy_url: proxyURL.trim() || undefined,
         enrichment_enabled: enrichmentEnabled,
         geohash_mode: true,
         geohash_area: effectiveArea,
@@ -135,7 +133,6 @@ export function CreateCampaignModal({ open, onClose }: Props) {
         services,
         locations,
         concurrency,
-        proxy_url: proxyURL.trim() || undefined,
         enrichment_enabled: enrichmentEnabled,
       });
     }
@@ -447,17 +444,6 @@ export function CreateCampaignModal({ open, onClose }: Props) {
             {showAdvanced ? 'Hide' : 'Show'} Advanced Options
           </button>
 
-          {showAdvanced && (
-            <div className="mt-3 animate-slide-up">
-              <Input
-                label="Proxy URL (optional)"
-                value={proxyURL}
-                onChange={(e) => setProxyURL(e.target.value)}
-                placeholder="http://user:pass@host:port"
-                hint="Leave empty to use direct connection"
-              />
-            </div>
-          )}
         </div>
 
         {/* Footer */}

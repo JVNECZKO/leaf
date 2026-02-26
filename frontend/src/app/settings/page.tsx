@@ -26,14 +26,6 @@ const SETTING_FIELDS = [
     desc: 'Concurrent website enrichment workers — changes apply immediately',
   },
   {
-    key: 'PROXY_URL',
-    label: 'Proxy URL',
-    type: 'text' as const,
-    requiresRestart: true,
-    desc: 'HTTP proxy for all requests, e.g. http://user:pass@host:port',
-    placeholder: 'http://user:pass@host:port',
-  },
-  {
     key: 'HEADLESS',
     label: 'Headless Mode',
     type: 'toggle' as const,
@@ -163,7 +155,7 @@ export default function SettingsPage() {
                       onChange={e => set(field.key, e.target.value)}
                       min={'min' in field ? field.min : undefined}
                       max={'max' in field ? field.max : undefined}
-                      placeholder={'placeholder' in field ? field.placeholder : undefined}
+                      placeholder={'placeholder' in field ? (field as { placeholder: string }).placeholder : undefined}
                       className="w-full px-3 py-2 rounded-lg text-sm bg-bg-surface border border-border text-text-primary placeholder:text-text-muted focus:outline-none focus:ring-2 focus:ring-accent/30 focus:border-border-active"
                     />
                   )}
@@ -171,6 +163,71 @@ export default function SettingsPage() {
               ))}
             </div>
           )}
+        </div>
+
+        {/* Proxy Settings */}
+        <div className="glass-card p-6">
+          <div className="flex items-center gap-3 mb-6">
+            <div className="w-8 h-8 bg-[#A78BFA]/10 rounded-lg flex items-center justify-center">
+              <Globe className="w-4 h-4 text-[#A78BFA]" />
+            </div>
+            <h2 className="text-base font-semibold text-text-primary">Proxy Settings</h2>
+          </div>
+
+          {/* PROXY_LIST */}
+          <div className="p-4 bg-bg-base rounded-lg border border-border mb-3">
+            <div className="flex items-center justify-between mb-1.5">
+              <div className="flex items-center gap-2">
+                <label className="text-sm font-medium text-text-primary">Proxy List</label>
+                <span className="text-[10px] px-1.5 py-0.5 rounded bg-success/10 text-success font-medium flex items-center gap-1">
+                  <Zap className="w-2.5 h-2.5" /> live
+                </span>
+              </div>
+              {(() => {
+                const count = (values['PROXY_LIST'] ?? '').split('\n').filter(l => l.trim()).length;
+                return count > 0 ? (
+                  <span className="text-xs text-text-muted">{count} {count === 1 ? 'proxy' : 'proxies'} loaded</span>
+                ) : null;
+              })()}
+            </div>
+            <p className="text-xs text-text-muted mb-3">One proxy per line: http://user:pass@host:port</p>
+            <textarea
+              rows={5}
+              value={values['PROXY_LIST'] ?? ''}
+              onChange={e => set('PROXY_LIST', e.target.value)}
+              placeholder={'http://user:pass@proxy1.example.com:10000\nhttp://user:pass@proxy2.example.com:10000'}
+              className="w-full px-3 py-2 rounded-lg text-sm bg-bg-surface border border-border text-text-primary placeholder:text-text-muted focus:outline-none focus:ring-2 focus:ring-accent/30 focus:border-border-active font-mono resize-none"
+            />
+          </div>
+
+          {/* PROXY_ROTATION */}
+          <div className="p-4 bg-bg-base rounded-lg border border-border">
+            <div className="flex items-center justify-between mb-1.5">
+              <div className="flex items-center gap-2">
+                <label className="text-sm font-medium text-text-primary">Rotation</label>
+                <span className="text-[10px] px-1.5 py-0.5 rounded bg-success/10 text-success font-medium flex items-center gap-1">
+                  <Zap className="w-2.5 h-2.5" /> live
+                </span>
+              </div>
+            </div>
+            <p className="text-xs text-text-muted mb-3">Rotate between proxies on each search (round-robin)</p>
+            <button
+              type="button"
+              onClick={() => set('PROXY_ROTATION', values['PROXY_ROTATION'] === 'true' ? 'false' : 'true')}
+              className="flex items-center gap-3"
+            >
+              <div className={`relative w-10 h-5 rounded-full transition-colors ${
+                values['PROXY_ROTATION'] === 'true' ? 'bg-accent' : 'bg-bg-hover'
+              }`}>
+                <div className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full transition-transform ${
+                  values['PROXY_ROTATION'] === 'true' ? 'translate-x-5' : 'translate-x-0'
+                }`} />
+              </div>
+              <span className="text-sm text-text-secondary">
+                {values['PROXY_ROTATION'] === 'true' ? 'Enabled' : 'Disabled'}
+              </span>
+            </button>
+          </div>
         </div>
 
         {/* About */}

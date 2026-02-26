@@ -38,7 +38,6 @@ export interface Campaign {
   name: string;
   status: 'pending' | 'running' | 'paused' | 'completed' | 'failed';
   concurrency: number;
-  proxy_url: string;
   enrichment_enabled: boolean;
   total_tasks: number;
   completed_tasks: number;
@@ -131,7 +130,6 @@ export interface CreateCampaignPayload {
   services: string[];
   locations?: string[];
   concurrency: number;
-  proxy_url?: string;
   enrichment_enabled?: boolean;
   geohash_mode?: boolean;
   geohash_area?: string;

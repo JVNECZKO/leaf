@@ -222,7 +222,6 @@ type CreateCampaignRequest struct {
 	Services          []string `json:"services" binding:"required,min=1"`
 	Locations         []string `json:"locations"`
 	Concurrency       int      `json:"concurrency"`
-	ProxyURL          string   `json:"proxy_url"`
 	EnrichmentEnabled *bool    `json:"enrichment_enabled"`
 	// Geohash mode — mutually exclusive with Locations
 	GeohashMode      bool   `json:"geohash_mode"`
@@ -266,7 +265,6 @@ func (s *Server) createCampaign(c *gin.Context) {
 		Name:              req.Name,
 		Status:            models.CampaignPending,
 		Concurrency:       req.Concurrency,
-		ProxyURL:          req.ProxyURL,
 		EnrichmentEnabled: enrichEnabled,
 		GeohashMode:       req.GeohashMode,
 		GeohashArea:       req.GeohashArea,

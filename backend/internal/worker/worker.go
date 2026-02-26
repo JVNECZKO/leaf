@@ -11,6 +11,7 @@ import (
 	"log"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -27,22 +28,38 @@ type BroadcastMsg struct {
 type Manager struct {
 	repo      *db.Repository
 	enricher  *enrichment.Enricher
-	scraper   *scraper.Scraper
 	broadcast chan BroadcastMsg
 	active    map[uuid.UUID]context.CancelFunc
 	mu        sync.Mutex
 }
 
-func NewManager(repo *db.Repository, scrpr *scraper.Scraper, enrichr *enrichment.Enricher, broadcast chan BroadcastMsg) *Manager {
+func NewManager(repo *db.Repository, enrichr *enrichment.Enricher, broadcast chan BroadcastMsg) *Manager {
 	m := &Manager{
 		repo:      repo,
 		enricher:  enrichr,
-		scraper:   scrpr,
 		broadcast: broadcast,
 		active:    map[uuid.UUID]context.CancelFunc{},
 	}
 	go m.enrichmentLoop()
 	return m
+}
+
+// buildPool reads proxy settings from DB and creates a Scraper pool for the campaign run.
+func (m *Manager) buildPool() *scraper.Pool {
+	raw := m.repo.GetSetting("PROXY_LIST", "")
+	var proxies []string
+	for _, line := range strings.Split(raw, "\n") {
+		if p := strings.TrimSpace(line); p != "" {
+			proxies = append(proxies, p)
+		}
+	}
+	rotation := m.repo.GetSetting("PROXY_ROTATION", "false") == "true"
+	headlessStr := m.repo.GetSetting("HEADLESS", os.Getenv("HEADLESS"))
+	headless := headlessStr != "false"
+	if len(proxies) > 0 {
+		log.Printf("[worker] proxy pool: %d proxies, rotation=%v", len(proxies), rotation)
+	}
+	return scraper.NewPool(proxies, headless, rotation)
 }
 
 func (m *Manager) StartCampaign(campaignID uuid.UUID) error {
@@ -126,6 +143,9 @@ func (m *Manager) runCampaign(ctx context.Context, campaignID uuid.UUID) {
 	m.repo.UpdateCampaignStatus(campaignID, models.CampaignRunning)
 	m.broadcast <- BroadcastMsg{Type: "campaign_started", CampaignID: campaignID}
 
+	pool := m.buildPool()
+	defer pool.Close()
+
 	concurrency := campaign.Concurrency
 	if concurrency <= 0 {
 		concurrency = 2
@@ -171,7 +191,7 @@ func (m *Manager) runCampaign(ctx context.Context, campaignID uuid.UUID) {
 			go func(s, l string) {
 				defer wg.Done()
 				defer sem.Release(1)
-				m.runTask(ctx, campaign, s, l)
+				m.runTask(ctx, campaign, s, l, pool)
 			}(svc, loc)
 
 			idx++
@@ -193,12 +213,12 @@ done:
 	}
 }
 
-func (m *Manager) runTask(ctx context.Context, campaign *models.Campaign, service, location string) {
+func (m *Manager) runTask(ctx context.Context, campaign *models.Campaign, service, location string, pool *scraper.Pool) {
 	log.Printf("[worker] task: %q in %q", service, location)
 
 	leadCount := 0
 
-	err := m.scraper.Search(ctx, service, location, func(place *scraper.Place) {
+	err := pool.Search(ctx, service, location, func(place *scraper.Place) {
 		lead := placeToLead(place, campaign.ID, uuid.Nil)
 
 		if campaign.EnrichmentEnabled && lead.Website != "" && lead.Email == "" {

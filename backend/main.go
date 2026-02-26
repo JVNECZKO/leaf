@@ -5,7 +5,6 @@ import (
 	"leaf/internal/db"
 	"leaf/internal/enrichment"
 	"leaf/internal/hub"
-	"leaf/internal/scraper"
 	"leaf/internal/worker"
 	"log"
 	"os"
@@ -19,18 +18,11 @@ func main() {
 	database := db.Connect()
 	repo := db.NewRepository(database)
 
-	scraperCfg := scraper.Config{
-		ProxyURL: os.Getenv("PROXY_URL"),
-		Headless: os.Getenv("HEADLESS") != "false",
-	}
-	scrpr := scraper.New(scraperCfg)
-	defer scrpr.Close()
-
 	enrichr := enrichment.New(os.Getenv("PROXY_URL"))
 
 	broadcast := make(chan worker.BroadcastMsg, 512)
 
-	mgr := worker.NewManager(repo, scrpr, enrichr, broadcast)
+	mgr := worker.NewManager(repo, enrichr, broadcast)
 
 	wsHub := hub.New(broadcast)
 

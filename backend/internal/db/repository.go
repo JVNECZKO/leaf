@@ -238,6 +238,17 @@ func (r *Repository) GetAllSettings() ([]models.Setting, error) {
 	return settings, r.db.Order("key").Find(&settings).Error
 }
 
+func (r *Repository) GetSetting(key, fallback string) string {
+	var s models.Setting
+	if err := r.db.First(&s, "key = ?", key).Error; err != nil {
+		return fallback
+	}
+	if s.Value == "" {
+		return fallback
+	}
+	return s.Value
+}
+
 func (r *Repository) GetSettingInt(key string, fallback int) int {
 	var s models.Setting
 	if err := r.db.First(&s, "key = ?", key).Error; err != nil {
