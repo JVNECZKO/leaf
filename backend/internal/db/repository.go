@@ -89,6 +89,16 @@ func (r *Repository) DeleteCampaign(id uuid.UUID) error {
 	return r.db.Delete(&models.Campaign{}, "id = ?", id).Error
 }
 
+func (r *Repository) DeleteAllCampaigns() (int64, error) {
+	sess := r.db.Session(&gorm.Session{AllowGlobalUpdate: true})
+	sess.Delete(&models.Lead{})
+	sess.Delete(&models.Task{})
+	sess.Delete(&models.Service{})
+	sess.Delete(&models.Location{})
+	res := sess.Delete(&models.Campaign{})
+	return res.RowsAffected, res.Error
+}
+
 func (r *Repository) CreateServices(services []models.Service) error {
 	if len(services) == 0 {
 		return nil
@@ -274,7 +284,11 @@ func (r *Repository) GetSettingInt(key string, fallback int) int {
 
 func (r *Repository) UpsertSettings(updates map[string]string) error {
 	for key, value := range updates {
-		if err := r.db.Model(&models.Setting{}).Where("key = ?", key).Update("value", value).Error; err != nil {
+		s := models.Setting{Key: key, Value: value}
+		if err := r.db.Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "key"}},
+			DoUpdates: clause.AssignmentColumns([]string{"value"}),
+		}).Create(&s).Error; err != nil {
 			return err
 		}
 	}

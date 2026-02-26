@@ -72,6 +72,16 @@ export default function CampaignsPage() {
     onError: (e: Error) => toast.error(e.message),
   });
 
+  const deleteAllMutation = useMutation({
+    mutationFn: api.campaigns.deleteAll,
+    onSuccess: (res) => {
+      qc.invalidateQueries({ queryKey: ['campaigns'] });
+      qc.invalidateQueries({ queryKey: ['stats'] });
+      toast.success(`Removed ${res.deleted} campaign${res.deleted !== 1 ? 's' : ''}`);
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+
   const runningCount = campaigns?.filter(c => c.status === 'running').length ?? 0;
 
   // Group campaigns: batched ones grouped by batch_id, standalone ones listed normally
@@ -110,6 +120,20 @@ export default function CampaignsPage() {
               icon={<PauseCircle className="w-4 h-4" />}
             >
               Pause All
+            </Button>
+          )}
+          {(campaigns?.length ?? 0) > 0 && (
+            <Button
+              variant="ghost"
+              onClick={() => {
+                if (confirm(`Remove all ${campaigns?.length} campaigns and their data? This cannot be undone.`))
+                  deleteAllMutation.mutate();
+              }}
+              loading={deleteAllMutation.isPending}
+              icon={<Trash2 className="w-4 h-4" />}
+              className="text-danger hover:text-danger"
+            >
+              Remove All
             </Button>
           )}
           <Button onClick={() => setModalOpen(true)} icon={<Plus className="w-4 h-4" />}>

@@ -180,6 +180,7 @@ func (s *Server) registerRoutes() {
 	api.POST("/campaigns", s.createCampaign)
 	api.POST("/campaigns/batch", s.createBatchCampaigns)
 	api.POST("/campaigns/stop-all", s.stopAllCampaigns)
+	api.DELETE("/campaigns", s.deleteAllCampaigns)
 	api.GET("/campaigns/:id", s.getCampaign)
 	api.PUT("/campaigns/:id", s.editCampaign)
 	api.DELETE("/campaigns/:id", s.deleteCampaign)
@@ -888,6 +889,25 @@ func (s *Server) stopAllCampaigns(c *gin.Context) {
 		s.manager.StopCampaign(id)
 	}
 	c.JSON(200, gin.H{"ok": true, "stopped": len(ids)})
+}
+
+func (s *Server) deleteAllCampaigns(c *gin.Context) {
+	// Stop all running campaigns first
+	ids, err := s.repo.ListRunningCampaignIDs()
+	if err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	for _, id := range ids {
+		s.manager.StopCampaign(id)
+	}
+	// Delete everything
+	deleted, err := s.repo.DeleteAllCampaigns()
+	if err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(200, gin.H{"ok": true, "deleted": deleted})
 }
 
 func (s *Server) editCampaign(c *gin.Context) {

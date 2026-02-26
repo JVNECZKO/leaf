@@ -206,6 +206,7 @@ export const api = {
     createBatch: (data: CreateBatchPayload) =>
       request<BatchResult>('/campaigns/batch', { method: 'POST', body: JSON.stringify(data) }),
     stopAll: () => request<{ ok: boolean; stopped: number }>('/campaigns/stop-all', { method: 'POST' }),
+    deleteAll: () => request<{ ok: boolean; deleted: number }>('/campaigns', { method: 'DELETE' }),
     update: (id: string, data: { name: string; concurrency: number; enrichment_enabled: boolean }) =>
       request<{ ok: boolean }>(`/campaigns/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
     delete: (id: string) => request<{ ok: boolean }>(`/campaigns/${id}`, { method: 'DELETE' }),

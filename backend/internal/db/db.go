@@ -82,6 +82,8 @@ func seedDefaultSettings(db *gorm.DB) {
 		{Key: "ENRICHMENT_WORKERS", Value: envOrDefault("ENRICHMENT_WORKERS", "10"), Description: "Concurrent website enrichment workers"},
 		{Key: "PROXY_URL", Value: os.Getenv("PROXY_URL"), Description: "HTTP proxy URL, e.g. http://user:pass@host:port (requires restart)"},
 		{Key: "HEADLESS", Value: envOrDefault("HEADLESS", "true"), Description: "Run Chrome in headless mode (requires restart)"},
+		{Key: "PROXY_LIST", Value: "", Description: "Proxy list, one per line: http://user:pass@host:port"},
+		{Key: "PROXY_ROTATION", Value: "false", Description: "Rotate proxies on each request (round-robin)"},
 	}
 	for i := range defaults {
 		db.Where(models.Setting{Key: defaults[i].Key}).FirstOrCreate(&defaults[i])
