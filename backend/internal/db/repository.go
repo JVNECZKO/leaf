@@ -6,6 +6,7 @@ import (
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 type Repository struct {
@@ -153,29 +154,37 @@ func (r *Repository) ListLeads(filter LeadFilter) ([]models.Lead, int64, error) 
 	var leads []models.Lead
 	var total int64
 
-	q := r.db.Model(&models.Lead{})
+	q := r.db.Model(&models.Lead{}).
+		Select("leads.*, campaigns.name AS campaign_name").
+		Joins("LEFT JOIN campaigns ON campaigns.id = leads.campaign_id")
 
 	if filter.CampaignID != uuid.Nil {
-		q = q.Where("campaign_id = ?", filter.CampaignID)
+		q = q.Where("leads.campaign_id = ?", filter.CampaignID)
+	}
+	if filter.CampaignName != "" {
+		q = q.Where("campaigns.name ILIKE ?", "%"+filter.CampaignName+"%")
+	}
+	if filter.SearchService != "" {
+		q = q.Where("leads.search_service ILIKE ?", "%"+filter.SearchService+"%")
 	}
 	if filter.Search != "" {
-		q = q.Where("name ILIKE ? OR email ILIKE ? OR phone ILIKE ? OR address ILIKE ?",
+		q = q.Where("leads.name ILIKE ? OR leads.email ILIKE ? OR leads.phone ILIKE ? OR leads.address ILIKE ?",
 			"%"+filter.Search+"%", "%"+filter.Search+"%", "%"+filter.Search+"%", "%"+filter.Search+"%")
 	}
 	if filter.HasEmail {
-		q = q.Where("email != ''")
+		q = q.Where("leads.email != ''")
 	}
 	if filter.HasPhone {
-		q = q.Where("phone != ''")
+		q = q.Where("leads.phone != ''")
 	}
 	if filter.HasWebsite {
-		q = q.Where("website != ''")
+		q = q.Where("leads.website != ''")
 	}
 
 	q.Count(&total)
 
 	offset := (filter.Page - 1) * filter.PageSize
-	err := q.Order("created_at desc").Offset(offset).Limit(filter.PageSize).Find(&leads).Error
+	err := q.Order("leads.created_at desc").Offset(offset).Limit(filter.PageSize).Scan(&leads).Error
 	return leads, total, err
 }
 
@@ -222,13 +231,15 @@ func (r *Repository) GetStats() (*models.Stats, error) {
 }
 
 type LeadFilter struct {
-	CampaignID uuid.UUID
-	Search     string
-	HasEmail   bool
-	HasPhone   bool
-	HasWebsite bool
-	Page       int
-	PageSize   int
+	CampaignID    uuid.UUID
+	CampaignName  string
+	SearchService string
+	Search        string
+	HasEmail      bool
+	HasPhone      bool
+	HasWebsite    bool
+	Page          int
+	PageSize      int
 }
 
 // --- Settings ---
@@ -288,4 +299,64 @@ func (r *Repository) DeleteLeads(ids []uuid.UUID) error {
 func (r *Repository) GetUserByEmail(email string) (*models.User, error) {
 	var user models.User
 	return &user, r.db.Where("email = ?", email).First(&user).Error
+}
+
+// --- Predefined Services ---
+
+func (r *Repository) ListPredefinedServices() ([]models.PredefinedService, error) {
+	var services []models.PredefinedService
+	return services, r.db.Order("name asc").Find(&services).Error
+}
+
+func (r *Repository) CreatePredefinedServices(services []models.PredefinedService) error {
+	if len(services) == 0 {
+		return nil
+	}
+	// Skip duplicates on unique name constraint
+	return r.db.Clauses(clause.OnConflict{DoNothing: true}).CreateInBatches(services, 100).Error
+}
+
+func (r *Repository) DeletePredefinedServices(ids []uuid.UUID) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	return r.db.Delete(&models.PredefinedService{}, "id IN ?", ids).Error
+}
+
+// --- Campaign batch (Split Mode) ---
+
+func (r *Repository) ListCampaignsByBatch(batchID uuid.UUID) ([]models.Campaign, error) {
+	var campaigns []models.Campaign
+	return campaigns, r.db.Where("batch_id = ?", batchID).Order("queue_position asc").Find(&campaigns).Error
+}
+
+func (r *Repository) CountRunningInBatch(batchID uuid.UUID) (int64, error) {
+	var count int64
+	return count, r.db.Model(&models.Campaign{}).
+		Where("batch_id = ? AND status = ?", batchID, models.CampaignRunning).
+		Count(&count).Error
+}
+
+func (r *Repository) GetNextQueuedInBatch(batchID uuid.UUID) (*models.Campaign, error) {
+	var c models.Campaign
+	err := r.db.Where("batch_id = ? AND status = ?", batchID, models.CampaignPending).
+		Order("queue_position asc").
+		First(&c).Error
+	if err != nil {
+		return nil, err
+	}
+	return &c, nil
+}
+
+func (r *Repository) UpdateCampaignFields(id uuid.UUID, name string, concurrency int, enrichment bool) error {
+	return r.db.Model(&models.Campaign{}).Where("id = ?", id).Updates(map[string]interface{}{
+		"name":               name,
+		"concurrency":        concurrency,
+		"enrichment_enabled": enrichment,
+	}).Error
+}
+
+func (r *Repository) ListRunningCampaignIDs() ([]uuid.UUID, error) {
+	var ids []uuid.UUID
+	return ids, r.db.Model(&models.Campaign{}).Where("status = ?", models.CampaignRunning).Pluck("id", &ids).Error
 }

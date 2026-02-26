@@ -7,7 +7,7 @@ import { Button } from '@/components/ui/button';
 import { formatDate } from '@/lib/utils';
 import {
   Download, Search, Mail, Phone, Globe, Star,
-  Users, MapPin, Sparkles, ChevronUp, ChevronDown, Filter, Trash2,
+  Users, MapPin, Sparkles, ChevronUp, ChevronDown, Filter, Trash2, Target, Briefcase,
 } from 'lucide-react';
 
 type SortField = 'name' | 'rating' | 'created_at';
@@ -20,6 +20,8 @@ export default function LeadsPage() {
   const [hasEmail, setHasEmail] = useState(false);
   const [hasPhone, setHasPhone] = useState(false);
   const [hasWebsite, setHasWebsite] = useState(false);
+  const [campaignName, setCampaignName] = useState('');
+  const [searchService, setSearchService] = useState('');
   const [sortField] = useState<SortField>('created_at');
   const [sortDir] = useState<SortDir>('desc');
   const [selectedLeads, setSelectedLeads] = useState<Set<string>>(new Set());
@@ -33,11 +35,18 @@ export default function LeadsPage() {
   if (hasEmail) params.has_email = 'true';
   if (hasPhone) params.has_phone = 'true';
   if (hasWebsite) params.has_website = 'true';
+  if (campaignName) params.campaign_name = campaignName;
+  if (searchService) params.search_service = searchService;
 
   const { data, isLoading } = useQuery({
     queryKey: ['leads', params],
     queryFn: () => api.leads.list(params),
     refetchInterval: 10000,
+  });
+
+  const { data: campaigns = [] } = useQuery({
+    queryKey: ['campaigns'],
+    queryFn: api.campaigns.list,
   });
 
   const leads = data?.data ?? [];
@@ -88,8 +97,15 @@ export default function LeadsPage() {
     }
   };
 
+  const resetFilters = () => {
+    setSearch(''); setHasEmail(false); setHasPhone(false); setHasWebsite(false);
+    setCampaignName(''); setSearchService(''); setPage(1);
+  };
+
+  const hasFilters = search || hasEmail || hasPhone || hasWebsite || campaignName || searchService;
+
   return (
-    <div className="p-8 max-w-7xl mx-auto animate-fade-in">
+    <div className="p-8 max-w-[1400px] mx-auto animate-fade-in">
       {/* Header */}
       <div className="flex items-center justify-between mb-8">
         <div>
@@ -118,37 +134,75 @@ export default function LeadsPage() {
       </div>
 
       {/* Filters */}
-      <div className="glass-card p-4 mb-6 flex items-center gap-3 flex-wrap">
-        <div className="flex-1 relative min-w-[200px]">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-text-muted" />
-          <input
-            type="text"
-            placeholder="Search by name, email, phone, address..."
-            value={search}
-            onChange={(e) => { setSearch(e.target.value); setPage(1); }}
-            className="w-full pl-9 pr-3 py-2 rounded-lg text-sm bg-bg-base border border-border text-text-primary placeholder:text-text-muted focus:outline-none focus:ring-2 focus:ring-accent/30 focus:border-border-active"
-          />
+      <div className="glass-card p-4 mb-6 space-y-3">
+        <div className="flex items-center gap-3 flex-wrap">
+          {/* Text search */}
+          <div className="flex-1 relative min-w-[200px]">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-text-muted" />
+            <input
+              type="text"
+              placeholder="Search by name, email, phone, address…"
+              value={search}
+              onChange={(e) => { setSearch(e.target.value); setPage(1); }}
+              className="w-full pl-9 pr-3 py-2 rounded-lg text-sm bg-bg-base border border-border text-text-primary placeholder:text-text-muted focus:outline-none focus:ring-2 focus:ring-accent/30 focus:border-border-active"
+            />
+          </div>
+
+          {/* Has X filters */}
+          <div className="flex items-center gap-2">
+            <Filter className="w-3.5 h-3.5 text-text-muted" />
+            {[
+              { state: hasEmail, setter: setHasEmail, label: 'Email', icon: Mail },
+              { state: hasPhone, setter: setHasPhone, label: 'Phone', icon: Phone },
+              { state: hasWebsite, setter: setHasWebsite, label: 'Website', icon: Globe },
+            ].map(({ state, setter, label, icon: Icon }) => (
+              <button
+                key={label}
+                onClick={() => { setter(!state); setPage(1); }}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border transition-all ${
+                  state
+                    ? 'bg-accent-muted text-accent-hover border-border-active'
+                    : 'border-border text-text-muted hover:border-border-hover hover:text-text-secondary'
+                }`}
+              >
+                <Icon className="w-3 h-3" /> {label}
+              </button>
+            ))}
+          </div>
+
+          {hasFilters && (
+            <button onClick={resetFilters} className="text-xs text-text-muted hover:text-text-secondary transition-colors">
+              Reset filters
+            </button>
+          )}
         </div>
 
-        <div className="flex items-center gap-2">
-          <Filter className="w-3.5 h-3.5 text-text-muted" />
-          {[
-            { state: hasEmail, setter: setHasEmail, label: 'Email', icon: Mail },
-            { state: hasPhone, setter: setHasPhone, label: 'Phone', icon: Phone },
-            { state: hasWebsite, setter: setHasWebsite, label: 'Website', icon: Globe },
-          ].map(({ state, setter, label, icon: Icon }) => (
-            <button
-              key={label}
-              onClick={() => { setter(!state); setPage(1); }}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border transition-all ${
-                state
-                  ? 'bg-accent-muted text-accent-hover border-border-active'
-                  : 'border-border text-text-muted hover:border-border-hover hover:text-text-secondary'
-              }`}
+        {/* Campaign + Service filters */}
+        <div className="flex items-center gap-3 flex-wrap">
+          <div className="relative min-w-[200px] flex-1 max-w-xs">
+            <Target className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-text-muted" />
+            <select
+              value={campaignName}
+              onChange={e => { setCampaignName(e.target.value); setPage(1); }}
+              className="w-full pl-8 pr-3 py-2 rounded-lg text-sm bg-bg-base border border-border text-text-primary focus:outline-none focus:ring-2 focus:ring-accent/30 focus:border-border-active appearance-none"
             >
-              <Icon className="w-3 h-3" /> {label}
-            </button>
-          ))}
+              <option value="">All campaigns</option>
+              {campaigns.map((c) => (
+                <option key={c.id} value={c.name}>{c.name}</option>
+              ))}
+            </select>
+          </div>
+
+          <div className="relative min-w-[180px] flex-1 max-w-xs">
+            <Briefcase className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-text-muted" />
+            <input
+              type="text"
+              placeholder="Filter by service…"
+              value={searchService}
+              onChange={e => { setSearchService(e.target.value); setPage(1); }}
+              className="w-full pl-8 pr-3 py-2 rounded-lg text-sm bg-bg-base border border-border text-text-primary placeholder:text-text-muted focus:outline-none focus:ring-2 focus:ring-accent/30 focus:border-border-active"
+            />
+          </div>
         </div>
       </div>
 
@@ -167,53 +221,56 @@ export default function LeadsPage() {
             <p className="text-xs text-text-muted mt-1">Try adjusting your filters or create a new campaign</p>
           </div>
         ) : (
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b border-border bg-bg-surface/50">
-                <th className="px-4 py-3 w-8">
-                  <input
-                    type="checkbox"
-                    checked={selectedLeads.size === leads.length && leads.length > 0}
-                    onChange={toggleAll}
-                    className="rounded border-border bg-bg-base accent-accent"
-                  />
-                </th>
-                {[
-                  { label: 'Business', field: 'name' },
-                  { label: 'Contact' },
-                  { label: 'Rating', field: 'rating' },
-                  { label: 'Enriched' },
-                  { label: 'Campaign' },
-                  { label: 'Added', field: 'created_at' },
-                  { label: '' },
-                ].map(({ label, field }, i) => (
-                  <th key={i} className="px-4 py-3 text-left text-xs font-medium text-text-muted uppercase tracking-wider">
-                    <div className="flex items-center gap-1">
-                      {label}
-                      {field && (
-                        <div className="flex flex-col">
-                          <ChevronUp className="w-2.5 h-2.5 text-text-muted/50" />
-                          <ChevronDown className="w-2.5 h-2.5 text-text-muted/50" />
-                        </div>
-                      )}
-                    </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-border bg-bg-surface/50">
+                  <th className="px-4 py-3 w-8">
+                    <input
+                      type="checkbox"
+                      checked={selectedLeads.size === leads.length && leads.length > 0}
+                      onChange={toggleAll}
+                      className="rounded border-border bg-bg-base accent-accent"
+                    />
                   </th>
+                  {[
+                    { label: 'Business', field: 'name' },
+                    { label: 'Contact' },
+                    { label: 'Rating', field: 'rating' },
+                    { label: 'Enriched' },
+                    { label: 'Campaign' },
+                    { label: 'Service' },
+                    { label: 'Added', field: 'created_at' },
+                    { label: '' },
+                  ].map(({ label, field }, i) => (
+                    <th key={i} className="px-4 py-3 text-left text-xs font-medium text-text-muted uppercase tracking-wider whitespace-nowrap">
+                      <div className="flex items-center gap-1">
+                        {label}
+                        {field && (
+                          <div className="flex flex-col">
+                            <ChevronUp className="w-2.5 h-2.5 text-text-muted/50" />
+                            <ChevronDown className="w-2.5 h-2.5 text-text-muted/50" />
+                          </div>
+                        )}
+                      </div>
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-border/50">
+                {leads.map((lead, i) => (
+                  <LeadRow
+                    key={lead.id}
+                    lead={lead}
+                    selected={selectedLeads.has(lead.id)}
+                    onSelect={() => toggleSelect(lead.id)}
+                    onDelete={() => handleDelete(lead.id)}
+                    alt={i % 2 !== 0}
+                  />
                 ))}
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-border/50">
-              {leads.map((lead, i) => (
-                <LeadRow
-                  key={lead.id}
-                  lead={lead}
-                  selected={selectedLeads.has(lead.id)}
-                  onSelect={() => toggleSelect(lead.id)}
-                  onDelete={() => handleDelete(lead.id)}
-                  alt={i % 2 !== 0}
-                />
-              ))}
-            </tbody>
-          </table>
+              </tbody>
+            </table>
+          </div>
         )}
       </div>
 
@@ -260,9 +317,9 @@ function LeadRow({
         />
       </td>
       <td className="px-4 py-3">
-        <div className="font-medium text-text-primary max-w-[200px] truncate">{lead.name || '—'}</div>
+        <div className="font-medium text-text-primary max-w-[180px] truncate">{lead.name || '—'}</div>
         {lead.address && (
-          <div className="text-xs text-text-muted flex items-center gap-1 mt-0.5 max-w-[200px] truncate">
+          <div className="text-xs text-text-muted flex items-center gap-1 mt-0.5 max-w-[180px] truncate">
             <MapPin className="w-2.5 h-2.5 flex-shrink-0" />
             {lead.address}
           </div>
@@ -276,7 +333,7 @@ function LeadRow({
           {lead.email && (
             <a href={`mailto:${lead.email}`} className="flex items-center gap-1.5 text-xs text-success hover:text-success/80 transition-colors">
               <Mail className="w-3 h-3" />
-              <span className="truncate max-w-[160px]">{lead.email}</span>
+              <span className="truncate max-w-[140px]">{lead.email}</span>
             </a>
           )}
           {lead.phone && (
@@ -286,7 +343,7 @@ function LeadRow({
             </a>
           )}
           {lead.website && (
-            <a href={lead.website} target="_blank" rel="noopener noreferrer" className="flex items-center gap-1.5 text-xs text-accent hover:text-accent-hover transition-colors truncate max-w-[160px]">
+            <a href={lead.website} target="_blank" rel="noopener noreferrer" className="flex items-center gap-1.5 text-xs text-accent hover:text-accent-hover transition-colors truncate max-w-[140px]">
               <Globe className="w-3 h-3 flex-shrink-0" />
               {lead.website.replace(/^https?:\/\//, '').replace(/\/$/, '')}
             </a>
@@ -318,11 +375,14 @@ function LeadRow({
           {lead.enrich_status}
         </span>
       </td>
-      <td className="px-4 py-3 text-xs text-text-muted">
-        <div>{lead.search_service}</div>
-        <div className="text-text-muted/60">{lead.search_location}</div>
+      <td className="px-4 py-3 text-xs text-text-muted max-w-[140px]">
+        <div className="truncate font-medium text-text-secondary">{lead.campaign_name || '—'}</div>
       </td>
-      <td className="px-4 py-3 text-xs text-text-muted">{formatDate(lead.created_at)}</td>
+      <td className="px-4 py-3 text-xs text-text-muted">
+        <div className="truncate max-w-[120px]">{lead.search_service || '—'}</div>
+        <div className="truncate max-w-[120px] text-text-muted/60 mt-0.5">{lead.search_location}</div>
+      </td>
+      <td className="px-4 py-3 text-xs text-text-muted whitespace-nowrap">{formatDate(lead.created_at)}</td>
       <td className="px-4 py-3 w-10">
         <button
           onClick={onDelete}

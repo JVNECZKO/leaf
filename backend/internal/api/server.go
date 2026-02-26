@@ -1,10 +1,12 @@
 package api
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/csv"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"leaf/internal/db"
 	"leaf/internal/geohash"
 	"leaf/internal/hub"
@@ -20,6 +22,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
+	"github.com/xuri/excelize/v2"
 	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
 )
@@ -165,10 +168,20 @@ func (s *Server) registerRoutes() {
 	// Stats
 	api.GET("/stats", s.getStats)
 
+	// Predefined Services
+	api.GET("/predefined-services", s.listPredefinedServices)
+	api.POST("/predefined-services", s.addPredefinedServices)
+	api.POST("/predefined-services/preview", s.previewImportServices)
+	api.POST("/predefined-services/import", s.importServices)
+	api.DELETE("/predefined-services", s.deletePredefinedServices)
+
 	// Campaigns
 	api.GET("/campaigns", s.listCampaigns)
 	api.POST("/campaigns", s.createCampaign)
+	api.POST("/campaigns/batch", s.createBatchCampaigns)
+	api.POST("/campaigns/stop-all", s.stopAllCampaigns)
 	api.GET("/campaigns/:id", s.getCampaign)
+	api.PUT("/campaigns/:id", s.editCampaign)
 	api.DELETE("/campaigns/:id", s.deleteCampaign)
 	api.POST("/campaigns/:id/start", s.startCampaign)
 	api.POST("/campaigns/:id/stop", s.stopCampaign)
@@ -474,15 +487,16 @@ func (s *Server) exportLeadsInternal(c *gin.Context, campaignID uuid.UUID) {
 
 	w := csv.NewWriter(c.Writer)
 	_ = w.Write([]string{
-		"Name", "Category", "Address", "Phone", "Email", "Website",
-		"Rating", "Reviews", "Search Service", "Search Location",
+		"Campaign", "Search Service", "Name", "Category", "Address", "Phone", "Email", "Website",
+		"Rating", "Reviews", "Search Location",
 		"Latitude", "Longitude", "Maps URL", "Hours",
 	})
 
 	for _, l := range leads {
 		w.Write([]string{
+			l.CampaignName, l.SearchService,
 			l.Name, l.Category, l.Address, l.Phone, l.Email, l.Website,
-			l.Rating, l.ReviewCount, l.SearchService, l.SearchLocation,
+			l.Rating, l.ReviewCount, l.SearchLocation,
 			strconv.FormatFloat(l.Latitude, 'f', 6, 64),
 			strconv.FormatFloat(l.Longitude, 'f', 6, 64),
 			l.MapsURL, l.Hours,
@@ -502,13 +516,15 @@ func buildLeadFilter(c *gin.Context, campaignID uuid.UUID) db.LeadFilter {
 	}
 
 	return db.LeadFilter{
-		CampaignID: campaignID,
-		Search:     c.Query("search"),
-		HasEmail:   c.Query("has_email") == "true",
-		HasPhone:   c.Query("has_phone") == "true",
-		HasWebsite: c.Query("has_website") == "true",
-		Page:       page,
-		PageSize:   pageSize,
+		CampaignID:    campaignID,
+		CampaignName:  c.Query("campaign_name"),
+		SearchService: c.Query("search_service"),
+		Search:        c.Query("search"),
+		HasEmail:      c.Query("has_email") == "true",
+		HasPhone:      c.Query("has_phone") == "true",
+		HasWebsite:    c.Query("has_website") == "true",
+		Page:          page,
+		PageSize:      pageSize,
 	}
 }
 
@@ -588,6 +604,315 @@ func (s *Server) updateSettings(c *gin.Context) {
 		return
 	}
 	if err := s.repo.UpsertSettings(updates); err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(200, gin.H{"ok": true})
+}
+
+// --- Predefined Services ---
+
+func (s *Server) listPredefinedServices(c *gin.Context) {
+	services, err := s.repo.ListPredefinedServices()
+	if err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(200, services)
+}
+
+func (s *Server) addPredefinedServices(c *gin.Context) {
+	var req struct {
+		Names []string `json:"names"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(400, gin.H{"error": err.Error()})
+		return
+	}
+	names := dedup(req.Names)
+	svcs := make([]models.PredefinedService, 0, len(names))
+	for _, n := range names {
+		svcs = append(svcs, models.PredefinedService{Name: n})
+	}
+	if err := s.repo.CreatePredefinedServices(svcs); err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(201, gin.H{"imported": len(svcs)})
+}
+
+func (s *Server) previewImportServices(c *gin.Context) {
+	file, _, err := c.Request.FormFile("file")
+	if err != nil {
+		c.JSON(400, gin.H{"error": "file required"})
+		return
+	}
+	defer file.Close()
+
+	colNames, rows, err := parseServiceFile(file, c.Request.Header.Get("Content-Type"))
+	if err != nil {
+		c.JSON(400, gin.H{"error": err.Error()})
+		return
+	}
+
+	preview := rows
+	if len(preview) > 10 {
+		preview = preview[:10]
+	}
+	c.JSON(200, gin.H{"columns": colNames, "rows": preview, "total": len(rows)})
+}
+
+func (s *Server) importServices(c *gin.Context) {
+	file, header, err := c.Request.FormFile("file")
+	if err != nil {
+		c.JSON(400, gin.H{"error": "file required"})
+		return
+	}
+	defer file.Close()
+
+	colIdx, _ := strconv.Atoi(c.DefaultPostForm("column", "0"))
+
+	_, rows, err := parseServiceFile(file, header.Header.Get("Content-Type"))
+	if err != nil {
+		c.JSON(400, gin.H{"error": err.Error()})
+		return
+	}
+
+	names := make([]string, 0, len(rows))
+	for _, row := range rows {
+		if colIdx < len(row) {
+			if n := strings.TrimSpace(row[colIdx]); n != "" {
+				names = append(names, n)
+			}
+		}
+	}
+	names = dedup(names)
+
+	svcs := make([]models.PredefinedService, 0, len(names))
+	for _, n := range names {
+		svcs = append(svcs, models.PredefinedService{Name: n})
+	}
+	if err := s.repo.CreatePredefinedServices(svcs); err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(200, gin.H{"imported": len(svcs)})
+}
+
+func (s *Server) deletePredefinedServices(c *gin.Context) {
+	var req struct {
+		IDs []string `json:"ids"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(400, gin.H{"error": err.Error()})
+		return
+	}
+	ids := make([]uuid.UUID, 0, len(req.IDs))
+	for _, raw := range req.IDs {
+		if id, err := uuid.Parse(raw); err == nil {
+			ids = append(ids, id)
+		}
+	}
+	if err := s.repo.DeletePredefinedServices(ids); err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(200, gin.H{"ok": true, "deleted": len(ids)})
+}
+
+// parseServiceFile reads CSV or XLSX and returns column headers + all rows as [][]string.
+func parseServiceFile(r io.Reader, _ string) ([]string, [][]string, error) {
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Try XLSX first (magic bytes PK\x03\x04 = zip/xlsx)
+	if len(data) > 3 && data[0] == 0x50 && data[1] == 0x4B {
+		f, err := excelize.OpenReader(bytes.NewReader(data))
+		if err == nil {
+			sheets := f.GetSheetList()
+			if len(sheets) == 0 {
+				return nil, nil, fmt.Errorf("empty xlsx file")
+			}
+			xlRows, err := f.GetRows(sheets[0])
+			if err != nil {
+				return nil, nil, err
+			}
+			if len(xlRows) == 0 {
+				return []string{}, [][]string{}, nil
+			}
+			return xlRows[0], xlRows[1:], nil
+		}
+	}
+
+	return parseCSVBytes(data)
+}
+
+func parseCSVBytes(data []byte) ([]string, [][]string, error) {
+	r := csv.NewReader(strings.NewReader(string(data)))
+	r.LazyQuotes = true
+	r.TrimLeadingSpace = true
+	all, err := r.ReadAll()
+	if err != nil {
+		return nil, nil, fmt.Errorf("cannot parse file as CSV or XLSX")
+	}
+	if len(all) == 0 {
+		return []string{}, [][]string{}, nil
+	}
+	return all[0], all[1:], nil
+}
+
+// --- Campaign batch (Split Mode) ---
+
+type CreateBatchRequest struct {
+	Services          []string `json:"services" binding:"required,min=1"`
+	Locations         []string `json:"locations"`
+	LocationMode      string   `json:"location_mode"` // "manual" | "geohash"
+	GeohashArea       string   `json:"geohash_area"`
+	GeohashPrecision  int      `json:"geohash_precision"`
+	Concurrency       int      `json:"concurrency"`
+	EnrichmentEnabled *bool    `json:"enrichment_enabled"`
+	NamePrefix        string   `json:"name_prefix"`
+	QueueConcurrency  int      `json:"queue_concurrency"` // 0 = auto
+	AutoStart         bool     `json:"auto_start"`
+}
+
+func (s *Server) createBatchCampaigns(c *gin.Context) {
+	var req CreateBatchRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(400, gin.H{"error": err.Error()})
+		return
+	}
+
+	if req.Concurrency <= 0 {
+		req.Concurrency = 2
+	}
+	enrichEnabled := true
+	if req.EnrichmentEnabled != nil {
+		enrichEnabled = *req.EnrichmentEnabled
+	}
+	precision := req.GeohashPrecision
+	if precision < 1 || precision > 9 {
+		precision = 4
+	}
+
+	isGeohash := req.LocationMode == "geohash"
+	if isGeohash && req.GeohashArea == "" {
+		c.JSON(400, gin.H{"error": "geohash_area required for geohash mode"})
+		return
+	}
+	if !isGeohash && len(req.Locations) == 0 {
+		c.JSON(400, gin.H{"error": "locations required for manual mode"})
+		return
+	}
+
+	services := dedup(req.Services)
+	batchID := uuid.New()
+	campaigns := make([]*models.Campaign, 0, len(services))
+
+	var totalTasks int
+	if isGeohash {
+		tiles, err := geohash.GenerateTiles(req.GeohashArea, uint(precision))
+		if err != nil {
+			c.JSON(400, gin.H{"error": fmt.Sprintf("invalid geohash area: %v", err)})
+			return
+		}
+		totalTasks = len(tiles)
+	} else {
+		totalTasks = len(dedup(req.Locations))
+	}
+
+	for i, svc := range services {
+		name := svc
+		if req.NamePrefix != "" {
+			name = svc + " — " + req.NamePrefix
+		}
+		campaign := &models.Campaign{
+			Name:              name,
+			Status:            models.CampaignPending,
+			Concurrency:       req.Concurrency,
+			EnrichmentEnabled: enrichEnabled,
+			GeohashMode:       isGeohash,
+			GeohashArea:       req.GeohashArea,
+			GeohashPrecision:  precision,
+			BatchID:           &batchID,
+			QueuePosition:     i,
+			TotalTasks:        totalTasks,
+		}
+		if err := s.repo.CreateCampaign(campaign); err != nil {
+			c.JSON(500, gin.H{"error": err.Error()})
+			return
+		}
+		svcModels := []models.Service{{CampaignID: campaign.ID, Name: svc}}
+		_ = s.repo.CreateServices(svcModels)
+
+		if !isGeohash {
+			locations := dedup(req.Locations)
+			locModels := make([]models.Location, 0, len(locations))
+			for _, loc := range locations {
+				locModels = append(locModels, models.Location{CampaignID: campaign.ID, Name: loc})
+			}
+			_ = s.repo.CreateLocations(locModels)
+		}
+		campaigns = append(campaigns, campaign)
+	}
+
+	campaignIDs := make([]uuid.UUID, len(campaigns))
+	for i, camp := range campaigns {
+		campaignIDs[i] = camp.ID
+	}
+
+	if req.AutoStart {
+		qc := req.QueueConcurrency
+		if qc <= 0 {
+			maxBrowsers := s.repo.GetSettingInt("MAX_BROWSERS", 3)
+			qc = maxBrowsers / req.Concurrency
+			if qc < 1 {
+				qc = 1
+			}
+		}
+		s.manager.StartBatch(batchID, campaignIDs, qc)
+	}
+
+	c.JSON(201, gin.H{"batch_id": batchID, "campaigns": campaigns, "count": len(campaigns)})
+}
+
+func (s *Server) stopAllCampaigns(c *gin.Context) {
+	ids, err := s.repo.ListRunningCampaignIDs()
+	if err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	for _, id := range ids {
+		s.manager.StopCampaign(id)
+	}
+	c.JSON(200, gin.H{"ok": true, "stopped": len(ids)})
+}
+
+func (s *Server) editCampaign(c *gin.Context) {
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(400, gin.H{"error": "invalid id"})
+		return
+	}
+	var req struct {
+		Name              string `json:"name"`
+		Concurrency       int    `json:"concurrency"`
+		EnrichmentEnabled bool   `json:"enrichment_enabled"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(400, gin.H{"error": err.Error()})
+		return
+	}
+	if req.Name == "" {
+		c.JSON(400, gin.H{"error": "name is required"})
+		return
+	}
+	if req.Concurrency <= 0 {
+		req.Concurrency = 2
+	}
+	if err := s.repo.UpdateCampaignFields(id, req.Name, req.Concurrency, req.EnrichmentEnabled); err != nil {
 		c.JSON(500, gin.H{"error": err.Error()})
 		return
 	}

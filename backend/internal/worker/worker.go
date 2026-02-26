@@ -25,23 +25,116 @@ type BroadcastMsg struct {
 	Payload    interface{} `json:"payload"`
 }
 
+type batchQueue struct {
+	campaignIDs []uuid.UUID
+	concurrency int
+	mu          sync.Mutex
+}
+
 type Manager struct {
 	repo      *db.Repository
 	enricher  *enrichment.Enricher
 	broadcast chan BroadcastMsg
 	active    map[uuid.UUID]context.CancelFunc
 	mu        sync.Mutex
+	// batch queues for Split Mode
+	queues   map[uuid.UUID]*batchQueue
+	queuesMu sync.Mutex
+	// reverse lookup: campaignID → batchID
+	campaignBatch   map[uuid.UUID]uuid.UUID
+	campaignBatchMu sync.Mutex
 }
 
 func NewManager(repo *db.Repository, enrichr *enrichment.Enricher, broadcast chan BroadcastMsg) *Manager {
 	m := &Manager{
-		repo:      repo,
-		enricher:  enrichr,
-		broadcast: broadcast,
-		active:    map[uuid.UUID]context.CancelFunc{},
+		repo:          repo,
+		enricher:      enrichr,
+		broadcast:     broadcast,
+		active:        map[uuid.UUID]context.CancelFunc{},
+		queues:        map[uuid.UUID]*batchQueue{},
+		campaignBatch: map[uuid.UUID]uuid.UUID{},
 	}
 	go m.enrichmentLoop()
 	return m
+}
+
+// StartBatch registers a batch and starts up to `concurrency` campaigns immediately.
+func (m *Manager) StartBatch(batchID uuid.UUID, campaignIDs []uuid.UUID, concurrency int) {
+	if len(campaignIDs) == 0 {
+		return
+	}
+	q := &batchQueue{campaignIDs: campaignIDs, concurrency: concurrency}
+	m.queuesMu.Lock()
+	m.queues[batchID] = q
+	m.queuesMu.Unlock()
+
+	m.campaignBatchMu.Lock()
+	for _, id := range campaignIDs {
+		m.campaignBatch[id] = batchID
+	}
+	m.campaignBatchMu.Unlock()
+
+	// Start up to `concurrency` campaigns now
+	for i := 0; i < concurrency && i < len(campaignIDs); i++ {
+		_ = m.StartCampaign(campaignIDs[i])
+	}
+}
+
+// onCampaignFinished is called at the end of every runCampaign goroutine.
+// If the campaign belongs to a batch queue, it starts the next pending campaign.
+func (m *Manager) onCampaignFinished(campaignID uuid.UUID) {
+	m.campaignBatchMu.Lock()
+	batchID, inBatch := m.campaignBatch[campaignID]
+	if inBatch {
+		delete(m.campaignBatch, campaignID)
+	}
+	m.campaignBatchMu.Unlock()
+
+	if !inBatch {
+		return
+	}
+
+	m.queuesMu.Lock()
+	q, ok := m.queues[batchID]
+	m.queuesMu.Unlock()
+	if !ok {
+		return
+	}
+
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	// Count how many in the batch are still running
+	m.mu.Lock()
+	running := 0
+	for _, id := range q.campaignIDs {
+		if _, active := m.active[id]; active {
+			running++
+		}
+	}
+	m.mu.Unlock()
+
+	// Start next pending campaigns up to concurrency limit
+	slots := q.concurrency - running
+	for _, id := range q.campaignIDs {
+		if slots <= 0 {
+			break
+		}
+		m.mu.Lock()
+		_, isActive := m.active[id]
+		m.mu.Unlock()
+		if isActive {
+			continue
+		}
+		// Check if still pending in DB
+		campaign, err := m.repo.GetCampaign(id)
+		if err != nil || campaign.Status != "pending" {
+			continue
+		}
+		if err := m.StartCampaign(id); err == nil {
+			slots--
+		}
+	}
 }
 
 // buildPool reads proxy settings from DB and creates a Scraper pool for the campaign run.
@@ -101,6 +194,7 @@ func (m *Manager) runCampaign(ctx context.Context, campaignID uuid.UUID) {
 		m.mu.Lock()
 		delete(m.active, campaignID)
 		m.mu.Unlock()
+		m.onCampaignFinished(campaignID)
 	}()
 
 	campaign, err := m.repo.GetCampaign(campaignID)

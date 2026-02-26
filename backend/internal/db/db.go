@@ -32,6 +32,7 @@ func Connect() *gorm.DB {
 		&models.Lead{},
 		&models.Setting{},
 		&models.User{},
+		&models.PredefinedService{},
 	); err != nil {
 		log.Fatalf("failed to migrate database: %v", err)
 	}

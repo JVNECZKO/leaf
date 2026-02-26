@@ -31,6 +31,29 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   return res.json();
 }
 
+async function requestMultipart<T>(path: string, formData: FormData): Promise<T> {
+  const token = getToken();
+  const headers: Record<string, string> = {};
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+
+  const res = await fetch(`${BASE_URL}/api${path}`, {
+    method: 'POST',
+    headers,
+    body: formData,
+  });
+
+  if (res.status === 401) {
+    clearToken();
+    if (typeof window !== 'undefined') window.location.href = '/login';
+    throw new Error('Unauthorized');
+  }
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(text || `HTTP ${res.status}`);
+  }
+  return res.json();
+}
+
 // --- Types ---
 
 export interface Campaign {
@@ -49,6 +72,8 @@ export interface Campaign {
   geohash_mode: boolean;
   geohash_area: string;
   geohash_precision: number;
+  batch_id?: string;
+  queue_position?: number;
   created_at: string;
   updated_at: string;
 }
@@ -80,6 +105,7 @@ export interface Task {
 export interface Lead {
   id: string;
   campaign_id: string;
+  campaign_name?: string;
   task_id: string;
   name: string;
   category: string;
@@ -125,6 +151,18 @@ export interface Setting {
   description: string;
 }
 
+export interface PredefinedService {
+  id: string;
+  name: string;
+  created_at: string;
+}
+
+export interface PreviewResult {
+  columns: string[];
+  rows: string[][];
+  total: number;
+}
+
 export interface CreateCampaignPayload {
   name: string;
   services: string[];
@@ -134,6 +172,25 @@ export interface CreateCampaignPayload {
   geohash_mode?: boolean;
   geohash_area?: string;
   geohash_precision?: number;
+}
+
+export interface CreateBatchPayload {
+  services: string[];
+  locations?: string[];
+  location_mode: 'manual' | 'geohash';
+  geohash_area?: string;
+  geohash_precision?: number;
+  concurrency: number;
+  enrichment_enabled?: boolean;
+  name_prefix?: string;
+  queue_concurrency: number; // 0 = auto
+  auto_start: boolean;
+}
+
+export interface BatchResult {
+  batch_id: string;
+  campaigns: Campaign[];
+  count: number;
 }
 
 // --- API calls ---
@@ -146,6 +203,11 @@ export const api = {
     get: (id: string) => request<Campaign>(`/campaigns/${id}`),
     create: (data: CreateCampaignPayload) =>
       request<Campaign>('/campaigns', { method: 'POST', body: JSON.stringify(data) }),
+    createBatch: (data: CreateBatchPayload) =>
+      request<BatchResult>('/campaigns/batch', { method: 'POST', body: JSON.stringify(data) }),
+    stopAll: () => request<{ ok: boolean; stopped: number }>('/campaigns/stop-all', { method: 'POST' }),
+    update: (id: string, data: { name: string; concurrency: number; enrichment_enabled: boolean }) =>
+      request<{ ok: boolean }>(`/campaigns/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
     delete: (id: string) => request<{ ok: boolean }>(`/campaigns/${id}`, { method: 'DELETE' }),
     start: (id: string) => request<{ ok: boolean; status: string }>(`/campaigns/${id}/start`, { method: 'POST' }),
     stop: (id: string) => request<{ ok: boolean; status: string }>(`/campaigns/${id}/stop`, { method: 'POST' }),
@@ -167,6 +229,31 @@ export const api = {
       request<{ ok: boolean }>(`/leads/${id}`, { method: 'DELETE' }),
     deleteBulk: (ids: string[]) =>
       request<{ ok: boolean; deleted: number }>('/leads', {
+        method: 'DELETE',
+        body: JSON.stringify({ ids }),
+      }),
+  },
+
+  predefinedServices: {
+    list: () => request<PredefinedService[]>('/predefined-services'),
+    add: (names: string[]) =>
+      request<{ imported: number }>('/predefined-services', {
+        method: 'POST',
+        body: JSON.stringify({ names }),
+      }),
+    preview: (file: File) => {
+      const fd = new FormData();
+      fd.append('file', file);
+      return requestMultipart<PreviewResult>('/predefined-services/preview', fd);
+    },
+    import: (file: File, column: number) => {
+      const fd = new FormData();
+      fd.append('file', file);
+      fd.append('column', String(column));
+      return requestMultipart<{ imported: number }>('/predefined-services/import', fd);
+    },
+    deleteBulk: (ids: string[]) =>
+      request<{ ok: boolean; deleted: number }>('/predefined-services', {
         method: 'DELETE',
         body: JSON.stringify({ ids }),
       }),

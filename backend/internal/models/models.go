@@ -46,6 +46,9 @@ type Campaign struct {
 	GeohashMode      bool   `gorm:"default:false" json:"geohash_mode"`
 	GeohashArea      string `json:"geohash_area,omitempty"` // "usa","poland","eu" or "minLat,maxLat,minLng,maxLng"
 	GeohashPrecision int    `gorm:"default:4" json:"geohash_precision"`
+	// Batch/Split Mode: campaigns created together share a batch_id
+	BatchID       *uuid.UUID `gorm:"type:uuid;index" json:"batch_id,omitempty"`
+	QueuePosition int        `gorm:"default:0" json:"queue_position"`
 	// Services are loaded (small set); Locations count is computed to avoid loading 60k+ rows
 	Services       []Service `gorm:"foreignKey:CampaignID" json:"services,omitempty"`
 	LocationsCount int64     `gorm:"-" json:"locations_count"`
@@ -126,16 +129,30 @@ type Lead struct {
 	PlusCode      string       `json:"plus_code"`
 	SocialLinks   string       `gorm:"type:text" json:"social_links"` // JSON array
 	ExtraEmails   string       `gorm:"type:text" json:"extra_emails"` // JSON array
-	EnrichStatus  EnrichStatus `gorm:"default:'none'" json:"enrich_status"`
-	SearchService string       `json:"search_service"`
-	SearchLocation string      `json:"search_location"`
-	CreatedAt     time.Time    `json:"created_at"`
-	UpdatedAt     time.Time    `json:"updated_at"`
+	EnrichStatus   EnrichStatus `gorm:"default:'none'" json:"enrich_status"`
+	SearchService  string       `json:"search_service"`
+	SearchLocation string       `json:"search_location"`
+	CampaignName   string       `gorm:"-" json:"campaign_name,omitempty"` // populated via JOIN, not stored
+	CreatedAt      time.Time    `json:"created_at"`
+	UpdatedAt      time.Time    `json:"updated_at"`
 }
 
 func (l *Lead) BeforeCreate(tx *gorm.DB) error {
 	if l.ID == uuid.Nil {
 		l.ID = uuid.New()
+	}
+	return nil
+}
+
+type PredefinedService struct {
+	ID        uuid.UUID `gorm:"type:uuid;primaryKey" json:"id"`
+	Name      string    `gorm:"not null;uniqueIndex" json:"name"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+func (p *PredefinedService) BeforeCreate(tx *gorm.DB) error {
+	if p.ID == uuid.Nil {
+		p.ID = uuid.New()
 	}
 	return nil
 }
