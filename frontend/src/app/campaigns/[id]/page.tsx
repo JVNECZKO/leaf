@@ -24,6 +24,9 @@ export default function CampaignDetailPage() {
   const [leadsPage, setLeadsPage] = useState(1);
   const [activeTab, setActiveTab] = useState<'leads' | 'tasks'>('leads');
   const [filters, setFilters] = useState({ has_email: '', has_phone: '', has_website: '', search: '' });
+  const [tasksPage, setTasksPage] = useState(1);
+  const [tasksPageSize, setTasksPageSize] = useState(10);
+  const [tasksStatus, setTasksStatus] = useState('failed');
 
   const { data: campaign, isLoading: campaignLoading } = useQuery({
     queryKey: ['campaign', id],
@@ -31,9 +34,15 @@ export default function CampaignDetailPage() {
     refetchInterval: 4000,
   });
 
-  const { data: tasks } = useQuery({
-    queryKey: ['campaign-tasks', id],
-    queryFn: () => api.campaigns.tasks(id),
+  const tasksParams: Record<string, string> = {
+    page: String(tasksPage),
+    page_size: String(tasksPageSize),
+  };
+  if (tasksStatus) tasksParams.status = tasksStatus;
+
+  const { data: tasksData, isLoading: tasksLoading } = useQuery({
+    queryKey: ['campaign-tasks', id, tasksParams],
+    queryFn: () => api.campaigns.tasks(id, tasksParams),
     enabled: activeTab === 'tasks',
     refetchInterval: 4000,
   });
@@ -285,16 +294,119 @@ export default function CampaignDetailPage() {
           {/* Progress summary */}
           <div className="grid grid-cols-3 gap-4">
             {[
-              { label: 'Completed', value: campaign.completed_tasks.toLocaleString(), color: 'text-success' },
-              { label: 'Failed', value: campaign.failed_tasks.toLocaleString(), color: 'text-danger' },
-              { label: 'Remaining', value: Math.max(0, campaign.total_tasks - campaign.completed_tasks - campaign.failed_tasks).toLocaleString(), color: 'text-text-secondary' },
-            ].map(({ label, value, color }) => (
-              <div key={label} className="glass-card p-4 text-center">
+              { label: 'Completed', value: campaign.completed_tasks.toLocaleString(), color: 'text-success', status: 'completed' },
+              { label: 'Failed', value: campaign.failed_tasks.toLocaleString(), color: 'text-danger', status: 'failed' },
+              { label: 'Remaining', value: Math.max(0, campaign.total_tasks - campaign.completed_tasks - campaign.failed_tasks).toLocaleString(), color: 'text-text-secondary', status: 'pending' },
+            ].map(({ label, value, color, status }) => (
+              <button
+                key={label}
+                onClick={() => { setTasksStatus(status); setTasksPage(1); }}
+                className={`glass-card p-4 text-center transition-all hover:border-border-hover ${tasksStatus === status ? 'border-border-active bg-accent-muted/20' : ''}`}
+              >
                 <div className={`text-2xl font-bold ${color}`}>{value}</div>
                 <div className="text-xs text-text-muted mt-1">{label}</div>
-              </div>
+              </button>
             ))}
           </div>
+
+          {/* Toolbar: status filter + page size */}
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-1.5">
+              {(['', 'failed', 'completed', 'pending', 'running'] as const).map((s) => (
+                <button
+                  key={s}
+                  onClick={() => { setTasksStatus(s); setTasksPage(1); }}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition-all ${
+                    tasksStatus === s
+                      ? 'bg-accent text-white border-transparent'
+                      : 'border-border text-text-muted hover:border-border-hover hover:text-text-secondary'
+                  }`}
+                >
+                  {s === '' ? 'All' : s.charAt(0).toUpperCase() + s.slice(1)}
+                </button>
+              ))}
+            </div>
+            <div className="flex items-center gap-2 text-xs text-text-muted">
+              <span>Per page:</span>
+              {[10, 25, 50, 100].map((n) => (
+                <button
+                  key={n}
+                  onClick={() => { setTasksPageSize(n); setTasksPage(1); }}
+                  className={`px-2.5 py-1 rounded-md border transition-all ${
+                    tasksPageSize === n
+                      ? 'bg-accent text-white border-transparent'
+                      : 'border-border text-text-muted hover:border-border-hover'
+                  }`}
+                >
+                  {n}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Tasks list */}
+          {tasksLoading ? (
+            <div className="glass-card divide-y divide-border">
+              {[...Array(tasksPageSize > 10 ? 10 : tasksPageSize)].map((_, i) => (
+                <div key={i} className="skeleton h-12 border-b border-border last:border-0" />
+              ))}
+            </div>
+          ) : (tasksData?.data?.length ?? 0) === 0 ? (
+            <div className="glass-card py-12 text-center">
+              <CheckCircle2 className="w-8 h-8 text-text-muted mx-auto mb-2 opacity-40" />
+              <p className="text-text-secondary text-sm">No {tasksStatus || ''} tasks</p>
+            </div>
+          ) : (
+            <div className="glass-card overflow-hidden">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-border bg-bg-hover">
+                    <th className="px-4 py-2.5 text-left text-xs font-medium text-text-muted uppercase tracking-wider">Status</th>
+                    <th className="px-4 py-2.5 text-left text-xs font-medium text-text-muted uppercase tracking-wider">Service</th>
+                    <th className="px-4 py-2.5 text-left text-xs font-medium text-text-muted uppercase tracking-wider">Location</th>
+                    <th className="px-4 py-2.5 text-left text-xs font-medium text-text-muted uppercase tracking-wider">Leads</th>
+                    <th className="px-4 py-2.5 text-left text-xs font-medium text-text-muted uppercase tracking-wider">Error</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {tasksData?.data?.map((task, i) => (
+                    <tr key={task.id} className={`border-b border-border/50 last:border-0 ${i % 2 === 0 ? '' : 'bg-bg-base/30'}`}>
+                      <td className="px-4 py-2.5"><StatusBadge status={task.status} /></td>
+                      <td className="px-4 py-2.5 font-medium text-text-primary">{task.service}</td>
+                      <td className="px-4 py-2.5 text-text-secondary">{task.location}</td>
+                      <td className="px-4 py-2.5 text-text-muted">{task.lead_count}</td>
+                      <td className="px-4 py-2.5">
+                        {task.error_msg ? (
+                          <span className="text-xs text-danger truncate max-w-xs block" title={task.error_msg}>
+                            {task.error_msg}
+                          </span>
+                        ) : <span className="text-text-muted">—</span>}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          {/* Pagination */}
+          {tasksData && tasksData.total > tasksPageSize && (
+            <div className="flex items-center justify-between text-sm">
+              <span className="text-text-muted">
+                {((tasksPage - 1) * tasksPageSize) + 1}–{Math.min(tasksPage * tasksPageSize, tasksData.total)} of {tasksData.total.toLocaleString()}
+              </span>
+              <div className="flex items-center gap-1">
+                <Button variant="secondary" size="sm" onClick={() => setTasksPage(1)} disabled={tasksPage === 1}>«</Button>
+                <Button variant="secondary" size="sm" onClick={() => setTasksPage(p => Math.max(1, p - 1))} disabled={tasksPage === 1}>‹ Prev</Button>
+                <span className="px-3 py-1 text-xs text-text-muted">
+                  Page {tasksPage} / {Math.ceil(tasksData.total / tasksPageSize)}
+                </span>
+                <Button variant="secondary" size="sm" onClick={() => setTasksPage(p => p + 1)} disabled={tasksPage * tasksPageSize >= tasksData.total}>Next ›</Button>
+                <Button variant="secondary" size="sm" onClick={() => setTasksPage(Math.ceil(tasksData.total / tasksPageSize))} disabled={tasksPage * tasksPageSize >= tasksData.total}>»</Button>
+              </div>
+            </div>
+          )}
+
           <div className="glass-card p-4 text-sm text-text-secondary">
             <p className="font-medium text-text-primary mb-1">Dynamic execution mode</p>
             <p className="text-text-muted text-xs">
@@ -304,29 +416,6 @@ export default function CampaignDetailPage() {
               Resume offset: {(campaign.task_offset ?? 0).toLocaleString()}.
             </p>
           </div>
-          {/* Failed tasks log */}
-          {(tasks?.length ?? 0) > 0 && (
-            <div>
-              <p className="text-xs text-text-muted mb-2 font-medium uppercase tracking-wider">Failed tasks log</p>
-              <div className="space-y-2">
-                {tasks?.filter(t => t.status === 'failed').map((task) => (
-                  <div key={task.id} className="glass-card p-3 flex items-center gap-3">
-                    <StatusBadge status={task.status} />
-                    <div className="flex-1 min-w-0">
-                      <span className="text-sm font-medium text-text-primary">{task.service}</span>
-                      <span className="text-text-muted mx-2">in</span>
-                      <span className="text-sm text-text-secondary">{task.location}</span>
-                    </div>
-                    {task.error_msg && (
-                      <span className="text-xs text-danger truncate max-w-xs" title={task.error_msg}>
-                        {task.error_msg}
-                      </span>
-                    )}
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
         </div>
       )}
     </div>

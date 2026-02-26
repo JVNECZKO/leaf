@@ -212,7 +212,10 @@ export const api = {
     delete: (id: string) => request<{ ok: boolean }>(`/campaigns/${id}`, { method: 'DELETE' }),
     start: (id: string) => request<{ ok: boolean; status: string }>(`/campaigns/${id}/start`, { method: 'POST' }),
     stop: (id: string) => request<{ ok: boolean; status: string }>(`/campaigns/${id}/stop`, { method: 'POST' }),
-    tasks: (id: string) => request<Task[]>(`/campaigns/${id}/tasks`),
+    tasks: (id: string, params?: Record<string, string>) => {
+      const qs = params ? '?' + new URLSearchParams(params).toString() : '';
+      return request<{ data: Task[]; total: number; page: number; page_size: number }>(`/campaigns/${id}/tasks${qs}`);
+    },
     leads: (id: string, params?: Record<string, string>) => {
       const qs = params ? '?' + new URLSearchParams(params).toString() : '';
       return request<LeadsResponse>(`/campaigns/${id}/leads${qs}`);

@@ -144,6 +144,19 @@ func (r *Repository) ListTasks(campaignID uuid.UUID) ([]models.Task, error) {
 	return tasks, err
 }
 
+func (r *Repository) ListTasksPaginated(campaignID uuid.UUID, status string, page, pageSize int) ([]models.Task, int64, error) {
+	var tasks []models.Task
+	var total int64
+	q := r.db.Model(&models.Task{}).Where("campaign_id = ?", campaignID)
+	if status != "" {
+		q = q.Where("status = ?", status)
+	}
+	q.Count(&total)
+	offset := (page - 1) * pageSize
+	err := q.Order("created_at asc").Offset(offset).Limit(pageSize).Find(&tasks).Error
+	return tasks, total, err
+}
+
 // --- Leads ---
 
 func (r *Repository) CreateLead(l *models.Lead) error {

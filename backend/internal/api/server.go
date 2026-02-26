@@ -411,13 +411,27 @@ func (s *Server) getCampaignTasks(c *gin.Context) {
 		return
 	}
 
-	tasks, err := s.repo.ListTasks(id)
+	page := 1
+	pageSize := 10
+	if p := c.Query("page"); p != "" {
+		if n, err := strconv.Atoi(p); err == nil && n > 0 {
+			page = n
+		}
+	}
+	if ps := c.Query("page_size"); ps != "" {
+		if n, err := strconv.Atoi(ps); err == nil && n > 0 && n <= 200 {
+			pageSize = n
+		}
+	}
+	status := c.Query("status")
+
+	tasks, total, err := s.repo.ListTasksPaginated(id, status, page, pageSize)
 	if err != nil {
 		c.JSON(500, gin.H{"error": err.Error()})
 		return
 	}
 
-	c.JSON(200, tasks)
+	c.JSON(200, gin.H{"data": tasks, "total": total, "page": page, "page_size": pageSize})
 }
 
 // --- Leads ---
