@@ -2,6 +2,7 @@ package scraper
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"math/rand"
@@ -10,6 +11,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/chromedp/cdproto/cdp"
@@ -19,9 +21,12 @@ import (
 )
 
 var latLngRe = regexp.MustCompile(`@(-?\d+\.\d+),(-?\d+\.\d+)`)
-
-// coordLocRe matches the geohash location format "lat,lng,zoom" (e.g. "52.230000,21.012000,10")
 var coordLocRe = regexp.MustCompile(`^(-?\d+\.?\d*),(-?\d+\.?\d*),(\d+)$`)
+
+// maxParallelTabs is the number of concurrent tabs used to fetch
+// individual place pages (for website URL). Higher values = faster
+// but more memory and higher detection risk.
+const maxParallelTabs = 4
 
 type Config struct {
 	ProxyURL string
@@ -29,11 +34,37 @@ type Config struct {
 }
 
 type Scraper struct {
-	allocCtx    context.Context
-	allocCancel context.CancelFunc
-	config      Config
-	proxyUser   string
-	proxyPass   string
+	allocCtx      context.Context
+	allocCancel   context.CancelFunc
+	browserCtx    context.Context
+	browserCancel context.CancelFunc
+	config        Config
+	proxyUser     string
+	proxyPass     string
+}
+
+// listItem holds data extracted from a single search result card
+// without navigating to the individual place page.
+type listItem struct {
+	PlaceURL    string
+	Name        string
+	Website     string // present when Google shows it in the list card
+	Phone       string
+	Rating      string
+	ReviewCount string
+	Lat         float64
+	Lng         float64
+}
+
+// placeDetail holds data fetched from the individual Google Maps place page.
+type placeDetail struct {
+	Website  string
+	Category string
+	Address  string
+	Phone    string
+	Lat      float64
+	Lng      float64
+	MapsURL  string
 }
 
 func New(cfg Config) *Scraper {
@@ -69,7 +100,7 @@ func New(cfg Config) *Scraper {
 		}
 		opts = append(opts, chromedp.ProxyServer(proxyHost))
 		if proxyUser != "" {
-			log.Printf("[scraper] proxy: %s (user: %s)", proxyHost, proxyUser)
+			log.Printf("[scraper] proxy configured with auth (user: %s)", proxyUser)
 		}
 	}
 
@@ -83,51 +114,42 @@ func New(cfg Config) *Scraper {
 
 	allocCtx, allocCancel := chromedp.NewExecAllocator(context.Background(), opts...)
 
+	// Start ONE browser process per Scraper and keep it alive.
+	// Each Search() call opens a tab in this process instead of spawning a new browser.
+	browserCtx, browserCancel := chromedp.NewContext(allocCtx, chromedp.WithLogf(log.Printf))
+	if err := chromedp.Run(browserCtx); err != nil {
+		log.Printf("[scraper] browser start error: %v", err)
+	}
+
 	return &Scraper{
-		allocCtx:    allocCtx,
-		allocCancel: allocCancel,
-		config:      cfg,
-		proxyUser:   proxyUser,
-		proxyPass:   proxyPass,
+		allocCtx:      allocCtx,
+		allocCancel:   allocCancel,
+		browserCtx:    browserCtx,
+		browserCancel: browserCancel,
+		config:        cfg,
+		proxyUser:     proxyUser,
+		proxyPass:     proxyPass,
 	}
 }
 
 func (s *Scraper) Close() {
+	s.browserCancel()
 	s.allocCancel()
 }
 
-// Search scrapes all Google Maps results for a given service and location.
-func (s *Scraper) Search(ctx context.Context, service, location string, onPlace func(*Place)) error {
-	taskCtx, cancel := chromedp.NewContext(s.allocCtx)
-	defer cancel()
-
-	timeoutCtx, cancelTimeout := context.WithTimeout(taskCtx, 8*time.Minute)
-	defer cancelTimeout()
-
-	var searchURL string
-	if m := coordLocRe.FindStringSubmatch(location); m != nil {
-		// Geohash/coordinate mode: search near lat,lng at the given zoom level
-		searchURL = "https://www.google.com/maps/search/" +
-			url.PathEscape(service) + "/@" + m[1] + "," + m[2] + "," + m[3] + "z"
-	} else {
-		// Text mode: "service location"
-		searchURL = "https://www.google.com/maps/search/" + url.PathEscape(service+" "+location)
-	}
-
-	log.Printf("[scraper] searching: %q in %q → %s", service, location, searchURL)
-
-	// Enable CDP Fetch domain to:
-	// 1. Block heavy resources (images, fonts, media) → saves 60-80% proxy bandwidth
-	// 2. Handle proxy auth challenges (when credentials are configured)
-	chromedp.ListenTarget(timeoutCtx, func(ev interface{}) {
+// enableFetch activates the CDP Fetch domain on ctx to:
+//  1. Block images, fonts, and media — saves bandwidth and speeds up loading.
+//  2. Handle proxy authentication challenges (when credentials are configured).
+func (s *Scraper) enableFetch(ctx context.Context) {
+	chromedp.ListenTarget(ctx, func(ev interface{}) {
 		switch e := ev.(type) {
 		case *fetch.EventAuthRequired:
 			if s.proxyUser == "" {
 				return
 			}
 			go func() {
-				c := chromedp.FromContext(timeoutCtx)
-				ctx2 := cdp.WithExecutor(timeoutCtx, c.Target)
+				c := chromedp.FromContext(ctx)
+				ctx2 := cdp.WithExecutor(ctx, c.Target)
 				_ = fetch.ContinueWithAuth(e.RequestID, &fetch.AuthChallengeResponse{
 					Response: fetch.AuthChallengeResponseResponseProvideCredentials,
 					Username: s.proxyUser,
@@ -136,9 +158,8 @@ func (s *Scraper) Search(ctx context.Context, service, location string, onPlace 
 			}()
 		case *fetch.EventRequestPaused:
 			go func() {
-				c := chromedp.FromContext(timeoutCtx)
-				ctx2 := cdp.WithExecutor(timeoutCtx, c.Target)
-				// Block image/font/media — not needed for scraping, huge bandwidth waste
+				c := chromedp.FromContext(ctx)
+				ctx2 := cdp.WithExecutor(ctx, c.Target)
 				switch e.ResourceType {
 				case network.ResourceTypeImage,
 					network.ResourceTypeFont,
@@ -150,83 +171,259 @@ func (s *Scraper) Search(ctx context.Context, service, location string, onPlace 
 			}()
 		}
 	})
-	if err := chromedp.Run(timeoutCtx, fetch.Enable().WithHandleAuthRequests(s.proxyUser != "")); err != nil {
+	if err := chromedp.Run(ctx, fetch.Enable().WithHandleAuthRequests(s.proxyUser != "")); err != nil {
 		log.Printf("[scraper] fetch.Enable: %v", err)
 	}
+}
 
-	if err := chromedp.Run(timeoutCtx, chromedp.Navigate(searchURL)); err != nil {
-		return fmt.Errorf("navigate: %w", err)
-	}
-
-	// Accept cookie consent if present
-	chromedp.Run(timeoutCtx, acceptCookies())
-
-	// Wait for results feed
-	if err := chromedp.Run(timeoutCtx,
-		chromedp.WaitVisible(`div[role="feed"]`, chromedp.ByQuery),
-	); err != nil {
-		// Maybe no results
-		return nil
-	}
-
-	jitter()
-
-	// Scroll to collect all place URLs
-	placeURLs, err := s.collectAllURLs(timeoutCtx)
+// Search scrapes Google Maps results for the given service + location.
+//
+// Strategy:
+//  1. Load the search results page and scroll until all cards are loaded.
+//  2. Extract place data directly from the list cards (name, coords, website
+//     when shown in card, phone, rating). No per-place page navigation needed
+//     for this phase — much faster than the old approach.
+//  3. For places whose website URL was NOT found in the list card, open
+//     their individual Google Maps page in parallel (up to maxParallelTabs
+//     concurrent tabs) and extract just the website + category + address.
+//  4. Call onPlace for each place as soon as its data is complete.
+func (s *Scraper) Search(ctx context.Context, service, location string, onPlace func(*Place)) error {
+	// Phase 1: collect all place data from the search results list.
+	items, err := s.collectFromList(ctx, service, location)
 	if err != nil {
 		return err
 	}
 
-	log.Printf("[scraper] found %d places for %q in %q", len(placeURLs), service, location)
+	log.Printf("[scraper] found %d places for %q in %q", len(items), service, location)
+	if len(items) == 0 {
+		return nil
+	}
 
-	// Scrape each place
-	for _, placeURL := range placeURLs {
+	// Phase 2: for places without a website from the list, fetch individual pages in parallel.
+	sem := make(chan struct{}, maxParallelTabs)
+	var wg sync.WaitGroup
+	var mu sync.Mutex // guards onPlace (called from goroutines)
+
+	for _, item := range items {
 		select {
 		case <-ctx.Done():
+			wg.Wait()
 			return ctx.Err()
 		default:
 		}
 
-		place, err := s.scrapePlaceURL(timeoutCtx, placeURL)
-		if err != nil {
-			log.Printf("[scraper] error scraping %s: %v", placeURL, err)
-			continue
-		}
-		place.SearchService = service
-		place.SearchLocation = location
-		onPlace(place)
-		jitter()
+		wg.Add(1)
+		go func(it listItem) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			place := itemToPlace(it, service, location)
+
+			if it.Website == "" {
+				detail := s.fetchPlaceDetail(ctx, it.PlaceURL)
+				if detail.Website != "" {
+					place.Website = detail.Website
+				}
+				if detail.Category != "" {
+					place.Category = detail.Category
+				}
+				if detail.Address != "" {
+					place.Address = detail.Address
+				}
+				if detail.Phone != "" && place.Phone == "" {
+					place.Phone = detail.Phone
+				}
+				if detail.Lat != 0 {
+					place.Latitude = detail.Lat
+					place.Longitude = detail.Lng
+				}
+				if detail.MapsURL != "" {
+					place.MapsURL = detail.MapsURL
+					if m := latLngRe.FindStringSubmatch(detail.MapsURL); len(m) >= 3 {
+						if lat, err := strconv.ParseFloat(m[1], 64); err == nil {
+							place.Latitude = lat
+						}
+						if lng, err := strconv.ParseFloat(m[2], 64); err == nil {
+							place.Longitude = lng
+						}
+					}
+				}
+			}
+
+			mu.Lock()
+			onPlace(place)
+			mu.Unlock()
+			jitter()
+		}(item)
 	}
 
+	wg.Wait()
 	return nil
 }
 
-func (s *Scraper) collectAllURLs(ctx context.Context) ([]string, error) {
+// collectFromList navigates to the Google Maps search results page, scrolls
+// until all results are loaded, and extracts place data from every card.
+// The search tab is opened, used, and closed within this function.
+func (s *Scraper) collectFromList(ctx context.Context, service, location string) ([]listItem, error) {
+	tabCtx, cancel := chromedp.NewContext(s.browserCtx)
+	defer cancel()
+
+	tCtx, tCancel := context.WithTimeout(tabCtx, 10*time.Minute)
+	defer tCancel()
+
+	s.enableFetch(tCtx)
+
+	var searchURL string
+	if m := coordLocRe.FindStringSubmatch(location); m != nil {
+		searchURL = "https://www.google.com/maps/search/" +
+			url.PathEscape(service) + "/@" + m[1] + "," + m[2] + "," + m[3] + "z"
+	} else {
+		searchURL = "https://www.google.com/maps/search/" + url.PathEscape(service+" "+location)
+	}
+
+	log.Printf("[scraper] searching: %q in %q → %s", service, location, searchURL)
+
+	if err := chromedp.Run(tCtx, chromedp.Navigate(searchURL)); err != nil {
+		return nil, fmt.Errorf("navigate: %w", err)
+	}
+
+	chromedp.Run(tCtx, acceptCookies())
+
+	if err := chromedp.Run(tCtx,
+		chromedp.WaitVisible(`div[role="feed"]`, chromedp.ByQuery),
+	); err != nil {
+		// No results for this search — not an error
+		return nil, nil
+	}
+
+	jitter()
+	return scrollAndExtract(tCtx)
+}
+
+// extractJS runs inside Google Maps search results and returns all visible
+// place cards as JSON. It extracts every piece of data available in the list
+// view without navigating to individual place pages.
+const extractJS = `JSON.stringify((() => {
+	const feed = document.querySelector('div[role="feed"]');
+	if (!feed) return [];
+	const results = [];
+	const seen = new Set();
+
+	feed.querySelectorAll('a[href*="/maps/place/"]').forEach(link => {
+		const raw = link.href;
+		const href = raw.split('?')[0];
+		if (!href || seen.has(href)) return;
+		seen.add(href);
+
+		// Walk up to find the direct child of the feed element (the card root)
+		let card = link;
+		while (card.parentElement && card.parentElement !== feed) {
+			card = card.parentElement;
+		}
+
+		// Name: aria-label on the primary place link is the most stable source
+		const name = link.getAttribute('aria-label') || '';
+
+		// Coords embedded in the href
+		const cm = raw.match(/@(-?\d+\.\d+),(-?\d+\.\d+)/);
+		const lat = cm ? parseFloat(cm[1]) : 0;
+		const lng = cm ? parseFloat(cm[2]) : 0;
+
+		// Website: any non-Google external link inside the card
+		// (Google sometimes shows a "Website" button linking directly to the business)
+		let website = '';
+		card.querySelectorAll('a[href]').forEach(a => {
+			if (website) return;
+			const h = a.href || '';
+			if (h.startsWith('http') &&
+				!h.includes('google.com') &&
+				!h.includes('goo.gl') &&
+				!h.includes('/maps/')) {
+				website = h;
+			}
+		});
+
+		// Phone: check for data-item-id pattern (present in some cards)
+		let phone = '';
+		const phoneEl = card.querySelector('[data-item-id^="phone:tel:"]');
+		if (phoneEl) {
+			phone = (phoneEl.getAttribute('data-item-id') || '').replace('phone:tel:', '');
+		}
+
+		// Rating: find "X.X" pattern in span text (e.g. "4.3", "3,7")
+		let rating = '';
+		let reviewCount = '';
+		card.querySelectorAll('span').forEach(span => {
+			if (rating && reviewCount) return;
+			const t = (span.innerText || '').trim();
+			if (!rating && /^\d[.,]\d$/.test(t)) {
+				rating = t.replace(',', '.');
+				return;
+			}
+			if (!reviewCount && /^\([\d,.]+\)$/.test(t)) {
+				reviewCount = t.replace(/[(),.\s]/g, '');
+			}
+		});
+
+		results.push({ href, name, website, phone, rating, reviewCount, lat, lng });
+	});
+
+	return results;
+})())`
+
+// scrollAndExtract scrolls the Google Maps feed until all results are loaded,
+// running the extraction JS after each scroll to pick up new cards.
+func scrollAndExtract(ctx context.Context) ([]listItem, error) {
 	seen := map[string]bool{}
+	var items []listItem
 	noChangeRounds := 0
 
 	for noChangeRounds < 4 {
-		var hrefs []string
-		if err := chromedp.Run(ctx, chromedp.Evaluate(`
-			Array.from(document.querySelectorAll('a[href*="/maps/place/"]'))
-				.map(a => a.href.split('?')[0])
-				.filter(h => h.includes('/maps/place/'))
-		`, &hrefs)); err != nil {
-			return nil, err
+		var jsonStr string
+		if err := chromedp.Run(ctx, chromedp.Evaluate(extractJS, &jsonStr)); err != nil {
+			return nil, fmt.Errorf("extract list: %w", err)
 		}
 
-		prevLen := len(seen)
-		for _, h := range hrefs {
-			seen[h] = true
+		var raw []struct {
+			Href        string  `json:"href"`
+			Name        string  `json:"name"`
+			Website     string  `json:"website"`
+			Phone       string  `json:"phone"`
+			Rating      string  `json:"rating"`
+			ReviewCount string  `json:"reviewCount"`
+			Lat         float64 `json:"lat"`
+			Lng         float64 `json:"lng"`
+		}
+		if jsonStr != "" && jsonStr != "null" {
+			_ = json.Unmarshal([]byte(jsonStr), &raw)
 		}
 
-		if len(seen) == prevLen {
+		prevLen := len(items)
+		for _, r := range raw {
+			if r.Href == "" || seen[r.Href] {
+				continue
+			}
+			seen[r.Href] = true
+			items = append(items, listItem{
+				PlaceURL:    r.Href,
+				Name:        r.Name,
+				Website:     r.Website,
+				Phone:       r.Phone,
+				Rating:      r.Rating,
+				ReviewCount: r.ReviewCount,
+				Lat:         r.Lat,
+				Lng:         r.Lng,
+			})
+		}
+
+		if len(items) == prevLen {
 			noChangeRounds++
 		} else {
 			noChangeRounds = 0
 		}
 
-		// Check if we hit end of results
+		// Check if the feed has reached its end
 		var endFound bool
 		chromedp.Run(ctx, chromedp.Evaluate(`
 			(() => {
@@ -238,128 +435,147 @@ func (s *Scraper) collectAllURLs(ctx context.Context) ([]string, error) {
 					   document.querySelector('.HlvSq') !== null;
 			})()
 		`, &endFound))
-
 		if endFound {
 			break
 		}
 
-		// Scroll the feed
+		// Scroll to load more results
 		chromedp.Run(ctx, chromedp.Evaluate(`
 			(() => {
 				const feed = document.querySelector('div[role="feed"]');
-				if (feed) {
-					feed.scrollBy(0, feed.clientHeight * 2);
-				}
+				if (feed) feed.scrollBy(0, feed.clientHeight * 2);
 			})()
 		`, nil))
 
 		time.Sleep(time.Duration(1200+rand.Intn(800)) * time.Millisecond)
 	}
 
-	result := make([]string, 0, len(seen))
-	for u := range seen {
-		result = append(result, u)
-	}
-	return result, nil
+	return items, nil
 }
 
-func (s *Scraper) scrapePlaceURL(ctx context.Context, placeURL string) (*Place, error) {
-	place := &Place{MapsURL: placeURL}
-	place.PlaceID = extractPlaceID(placeURL)
+// fetchPlaceDetail opens a Google Maps place page in a new tab and extracts
+// the website URL, category, address, and phone. Called only for places whose
+// website was not found in the search results list card.
+//
+// Uses polling instead of fixed sleeps: checks up to 5 times with 300 ms
+// intervals (max ~1.5 s wait) instead of the old 800 ms fixed sleep.
+func (s *Scraper) fetchPlaceDetail(ctx context.Context, placeURL string) placeDetail {
+	tabCtx, cancel := chromedp.NewContext(s.browserCtx)
+	defer cancel()
 
-	if err := chromedp.Run(ctx, chromedp.Navigate(placeURL)); err != nil {
-		return nil, err
+	tCtx, tCancel := context.WithTimeout(tabCtx, 15*time.Second)
+	defer tCancel()
+
+	s.enableFetch(tCtx)
+
+	var result placeDetail
+
+	if err := chromedp.Run(tCtx, chromedp.Navigate(placeURL)); err != nil {
+		return result
 	}
 
-	// Wait for name to load
-	if err := chromedp.Run(ctx, chromedp.WaitVisible(`h1`, chromedp.ByQuery)); err != nil {
-		return nil, err
+	// Wait for h1 — signals the place page has rendered its core content
+	if err := chromedp.Run(tCtx, chromedp.WaitVisible(`h1`, chromedp.ByQuery)); err != nil {
+		return result
 	}
 
-	time.Sleep(800 * time.Millisecond)
+	const detailJS = `JSON.stringify((() => {
+		const websiteEl  = document.querySelector('a[data-item-id="authority"]');
+		const addressBtn = document.querySelector('button[data-item-id="address"]');
+		const phoneBtn   = document.querySelector('[data-item-id^="phone:tel:"]');
+		const categoryEl = document.querySelector('button.DkEaL') ||
+		                   document.querySelector('[jsaction*="category"]');
+		const urlMatch   = window.location.href.match(/@(-?\d+\.\d+),(-?\d+\.\d+)/);
+		return {
+			website:  websiteEl  ? websiteEl.href : '',
+			address:  addressBtn ? (addressBtn.querySelector('.rogA2c,.Io6YTe')?.innerText || '').trim() : '',
+			phone:    phoneBtn   ? (
+				phoneBtn.querySelector('.rogA2c,.Io6YTe')?.innerText ||
+				phoneBtn.getAttribute('data-item-id')?.replace('phone:tel:','') || ''
+			).trim() : '',
+			category: categoryEl ? categoryEl.innerText.trim() : '',
+			lat: urlMatch ? parseFloat(urlMatch[1]) : 0,
+			lng: urlMatch ? parseFloat(urlMatch[2]) : 0,
+			url: window.location.href,
+		};
+	})())`
 
-	var result map[string]interface{}
-	if err := chromedp.Run(ctx, chromedp.Evaluate(`
-		(() => {
-			const getText = (sel) => {
-				const el = document.querySelector(sel);
-				return el ? (el.innerText || el.textContent || '').trim() : '';
-			};
-			const getAttr = (sel, attr) => {
-				const el = document.querySelector(sel);
-				return el ? (el.getAttribute(attr) || '').trim() : '';
-			};
+	// Poll up to ~1.5 s for the page data to be available.
+	// This replaces the old fixed 800 ms sleep — we stop as soon as we have data.
+	for i := 0; i < 5; i++ {
+		select {
+		case <-ctx.Done():
+			return result
+		case <-tCtx.Done():
+			return result
+		default:
+		}
 
-			const name = getText('h1');
-
-			const categoryEl = document.querySelector('button.DkEaL') ||
-				document.querySelector('[jsaction*="category"]');
-			const category = categoryEl ? categoryEl.innerText.trim() : '';
-
-			const addressBtn = document.querySelector('button[data-item-id="address"]');
-			const address = addressBtn ?
-				(addressBtn.querySelector('.rogA2c, .Io6YTe')?.innerText || addressBtn.getAttribute('aria-label') || '').replace('Address: ','').trim() : '';
-
-			const phoneBtn = document.querySelector('[data-item-id^="phone:tel:"]');
-			const phone = phoneBtn ?
-				(phoneBtn.querySelector('.rogA2c, .Io6YTe')?.innerText || phoneBtn.getAttribute('data-item-id')?.replace('phone:tel:','') || '').trim() : '';
-
-			const websiteEl = document.querySelector('a[data-item-id="authority"]');
-			const website = websiteEl ? websiteEl.href : '';
-
-			const ratingEl = document.querySelector('.F7nice');
-			const rating = ratingEl ? (ratingEl.querySelector('span[aria-hidden="true"]')?.innerText || '').trim() : '';
-			const reviewCount = ratingEl ? (ratingEl.querySelector('span[aria-label]')?.innerText || '').replace(/[()]/g,'').trim() : '';
-
-			const hoursEl = document.querySelector('.OMl5r, .t39EBf');
-			const hours = hoursEl ? hoursEl.innerText.trim() : '';
-
-			const plusCodeEl = document.querySelector('[data-item-id="oloc"]');
-			const plusCode = plusCodeEl ? (plusCodeEl.querySelector('.rogA2c, .Io6YTe')?.innerText || '').trim() : '';
-
-			const urlMatch = window.location.href.match(/@(-?\d+\.\d+),(-?\d+\.\d+)/);
-			const lat = urlMatch ? parseFloat(urlMatch[1]) : 0;
-			const lng = urlMatch ? parseFloat(urlMatch[2]) : 0;
-
-			return { name, category, address, phone, website, rating, reviewCount, hours, plusCode, lat, lng, currentURL: window.location.href };
-		})()
-	`, &result)); err != nil {
-		return nil, err
-	}
-
-	if result != nil {
-		place.Name = safeStr(result["name"])
-		place.Category = safeStr(result["category"])
-		place.Address = safeStr(result["address"])
-		place.Phone = safeStr(result["phone"])
-		place.Website = safeStr(result["website"])
-		place.Rating = safeStr(result["rating"])
-		place.ReviewCount = safeStr(result["reviewCount"])
-		place.Hours = safeStr(result["hours"])
-		place.PlusCode = safeStr(result["plusCode"])
-		place.Latitude = safeFloat(result["lat"])
-		place.Longitude = safeFloat(result["lng"])
-
-		// Update maps URL from current page (after any redirects)
-		if cu := safeStr(result["currentURL"]); cu != "" {
-			place.MapsURL = cu
-			if m := latLngRe.FindStringSubmatch(cu); len(m) >= 3 {
-				if lat, err := strconv.ParseFloat(m[1], 64); err == nil {
-					place.Latitude = lat
+		var jsonStr string
+		if err := chromedp.Run(tCtx, chromedp.Evaluate(detailJS, &jsonStr)); err == nil && jsonStr != "" && jsonStr != "null" {
+			var data struct {
+				Website  string  `json:"website"`
+				Address  string  `json:"address"`
+				Phone    string  `json:"phone"`
+				Category string  `json:"category"`
+				Lat      float64 `json:"lat"`
+				Lng      float64 `json:"lng"`
+				URL      string  `json:"url"`
+			}
+			if err := json.Unmarshal([]byte(jsonStr), &data); err == nil {
+				result = placeDetail{
+					Website:  data.Website,
+					Address:  data.Address,
+					Phone:    data.Phone,
+					Category: data.Category,
+					Lat:      data.Lat,
+					Lng:      data.Lng,
+					MapsURL:  data.URL,
 				}
-				if lng, err := strconv.ParseFloat(m[2], 64); err == nil {
-					place.Longitude = lng
+				// Stop polling as soon as we have the critical fields
+				if result.Website != "" || result.Address != "" || result.Category != "" {
+					break
 				}
 			}
 		}
+
+		time.Sleep(300 * time.Millisecond)
 	}
 
-	return place, nil
+	return result
+}
+
+// itemToPlace converts a listItem (from search results) into a Place.
+func itemToPlace(item listItem, service, location string) *Place {
+	p := &Place{
+		MapsURL:        item.PlaceURL,
+		Name:           item.Name,
+		Website:        item.Website,
+		Phone:          item.Phone,
+		Rating:         item.Rating,
+		ReviewCount:    item.ReviewCount,
+		Latitude:       item.Lat,
+		Longitude:      item.Lng,
+		PlaceID:        extractPlaceID(item.PlaceURL),
+		SearchService:  service,
+		SearchLocation: location,
+	}
+	// Coords in the list href may be imprecise — refine from the URL pattern
+	if item.Lat == 0 {
+		if m := latLngRe.FindStringSubmatch(item.PlaceURL); len(m) >= 3 {
+			if lat, err := strconv.ParseFloat(m[1], 64); err == nil {
+				p.Latitude = lat
+			}
+			if lng, err := strconv.ParseFloat(m[2], 64); err == nil {
+				p.Longitude = lng
+			}
+		}
+	}
+	return p
 }
 
 func acceptCookies() chromedp.Action {
 	return chromedp.ActionFunc(func(ctx context.Context) error {
-		// Try different cookie consent button patterns
 		selectors := []string{
 			`button[aria-label="Accept all"]`,
 			`button[aria-label="Alle akzeptieren"]`,
@@ -390,7 +606,6 @@ func extractPlaceID(placeURL string) string {
 	if m := re.FindStringSubmatch(placeURL); len(m) > 1 {
 		return m[1]
 	}
-	// Fallback: use the place name from URL
 	parts := strings.Split(placeURL, "/maps/place/")
 	if len(parts) > 1 {
 		name := strings.Split(parts[1], "/")[0]
