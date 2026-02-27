@@ -149,10 +149,11 @@ func (m *Manager) buildPool() *scraper.Pool {
 	rotation := m.repo.GetSetting("PROXY_ROTATION", "false") == "true"
 	headlessStr := m.repo.GetSetting("HEADLESS", os.Getenv("HEADLESS"))
 	headless := headlessStr != "false"
+	skipDetail := m.repo.GetSetting("SKIP_DETAIL_PAGES", "false") == "true"
 	if len(proxies) > 0 {
-		log.Printf("[worker] proxy pool: %d proxies, rotation=%v", len(proxies), rotation)
+		log.Printf("[worker] proxy pool: %d proxies, rotation=%v, skipDetail=%v", len(proxies), rotation, skipDetail)
 	}
-	return scraper.NewPool(proxies, headless, rotation)
+	return scraper.NewPool(proxies, headless, rotation, skipDetail)
 }
 
 func (m *Manager) StartCampaign(campaignID uuid.UUID) error {

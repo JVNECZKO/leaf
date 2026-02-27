@@ -17,13 +17,13 @@ type Pool struct {
 
 // NewPool creates one Scraper per proxy URL.
 // If proxyURLs is empty, one Scraper without a proxy is created.
-func NewPool(proxyURLs []string, headless, rotation bool) *Pool {
+func NewPool(proxyURLs []string, headless, rotation, skipDetailPages bool) *Pool {
 	if len(proxyURLs) == 0 {
 		proxyURLs = []string{""}
 	}
 	scrapers := make([]*Scraper, 0, len(proxyURLs))
 	for _, u := range proxyURLs {
-		scrapers = append(scrapers, New(Config{ProxyURL: u, Headless: headless}))
+		scrapers = append(scrapers, New(Config{ProxyURL: u, Headless: headless, SkipDetailPages: skipDetailPages}))
 	}
 	return &Pool{scrapers: scrapers, rotation: rotation}
 }

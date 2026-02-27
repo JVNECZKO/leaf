@@ -84,6 +84,7 @@ func seedDefaultSettings(db *gorm.DB) {
 		{Key: "HEADLESS", Value: envOrDefault("HEADLESS", "true"), Description: "Run Chrome in headless mode (requires restart)"},
 		{Key: "PROXY_LIST", Value: "", Description: "Proxy list, one per line: http://user:pass@host:port"},
 		{Key: "PROXY_ROTATION", Value: "false", Description: "Rotate proxies on each request (round-robin)"},
+		{Key: "SKIP_DETAIL_PAGES", Value: "false", Description: "Fast Scrape: skip individual place page fetches (~2x faster, may miss website/address/category for some places)"},
 	}
 	for i := range defaults {
 		db.Where(models.Setting{Key: defaults[i].Key}).FirstOrCreate(&defaults[i])

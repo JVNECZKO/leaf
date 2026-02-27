@@ -32,6 +32,13 @@ const SETTING_FIELDS = [
     requiresRestart: true,
     desc: 'Run Chrome without a visible window',
   },
+  {
+    key: 'SKIP_DETAIL_PAGES',
+    label: 'Fast Scrape Mode',
+    type: 'toggle' as const,
+    requiresRestart: true,
+    desc: '~2× faster: skip individual place page fetches. Trade-off: may miss website/address/category for places where Google doesn\'t show them in list cards.',
+  },
 ];
 
 export default function SettingsPage() {
