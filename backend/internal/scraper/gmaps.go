@@ -26,7 +26,7 @@ var coordLocRe = regexp.MustCompile(`^(-?\d+\.?\d*),(-?\d+\.?\d*),(\d+)$`)
 // maxParallelTabs is the number of concurrent tabs used to fetch
 // individual place pages (for website URL). Higher values = faster
 // but more memory and higher detection risk.
-const maxParallelTabs = 4
+const maxParallelTabs = 8
 
 type Config struct {
 	ProxyURL string
@@ -254,7 +254,6 @@ func (s *Scraper) Search(ctx context.Context, service, location string, onPlace 
 			mu.Lock()
 			onPlace(place)
 			mu.Unlock()
-			jitter()
 		}(item)
 	}
 
@@ -379,7 +378,7 @@ func scrollAndExtract(ctx context.Context) ([]listItem, error) {
 	var items []listItem
 	noChangeRounds := 0
 
-	for noChangeRounds < 4 {
+	for noChangeRounds < 3 {
 		var jsonStr string
 		if err := chromedp.Run(ctx, chromedp.Evaluate(extractJS, &jsonStr)); err != nil {
 			return nil, fmt.Errorf("extract list: %w", err)
@@ -447,7 +446,7 @@ func scrollAndExtract(ctx context.Context) ([]listItem, error) {
 			})()
 		`, nil))
 
-		time.Sleep(time.Duration(1200+rand.Intn(800)) * time.Millisecond)
+		time.Sleep(time.Duration(600+rand.Intn(400)) * time.Millisecond)
 	}
 
 	return items, nil
@@ -500,9 +499,9 @@ func (s *Scraper) fetchPlaceDetail(ctx context.Context, placeURL string) placeDe
 		};
 	})())`
 
-	// Poll up to ~1.5 s for the page data to be available.
-	// This replaces the old fixed 800 ms sleep — we stop as soon as we have data.
-	for i := 0; i < 5; i++ {
+	// Poll up to ~800 ms for the page data to be available.
+	// We stop as soon as we have the critical fields.
+	for i := 0; i < 4; i++ {
 		select {
 		case <-ctx.Done():
 			return result
@@ -539,7 +538,7 @@ func (s *Scraper) fetchPlaceDetail(ctx context.Context, placeURL string) placeDe
 			}
 		}
 
-		time.Sleep(300 * time.Millisecond)
+		time.Sleep(200 * time.Millisecond)
 	}
 
 	return result
